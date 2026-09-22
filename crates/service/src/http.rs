@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,6 +37,7 @@ pub fn router(state: Arc<Service>) -> Router {
         )
         .route("/snapshot", get(snapshot))
         .route("/jobs", post(record))
+        .route("/jobs/{id}", delete(delete_job))
         .route("/jobs/{id}/stop", post(stop))
         .route("/jobs/{id}/retry", post(retry))
         .route("/jobs/{id}/recover", post(recover))
@@ -94,6 +95,28 @@ async fn record(
         s.fanout_job(&job);
     }
     Ok(Json(s.store.job(&job.id)?))
+}
+async fn delete_job(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<Value> {
+    let job = {
+        let active = s.active.lock().await;
+        if active.contains_key(&id) {
+            return Err(anyhow::anyhow!("진행 중인 녹화는 삭제할 수 없습니다.").into());
+        }
+        let job = s.store.job(&id)?;
+        if !job.state.terminal() {
+            return Err(anyhow::anyhow!("녹화가 끝난 후 삭제할 수 있습니다.").into());
+        }
+        s.store.delete_job(&id)?;
+        job
+    };
+    if let Err(error) = tokio::fs::remove_dir_all(&job.output_dir).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(
+            anyhow::anyhow!("작업은 삭제했지만 녹화 파일 정리에 실패했습니다: {error}").into(),
+        );
+    }
+    Ok(Json(json!({"deleted":true})))
 }
 async fn events(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<Vec<JobEvent>> {
     Ok(Json(s.store.events(&id)?))

@@ -13,9 +13,8 @@
 /test-results/
 /playwright-report/
 
-# Project documentation intentionally excluded from this initial source commit.
-**/README.md
-**/README.*
+# Keep the Korean working notes local; the public README is English.
+**/.README.KO.md
 
 # Agent/editor instruction and local AI configuration.
 AGENTS.md

@@ -193,6 +193,22 @@ export default function App() {
   const safeOpen = (job: Job, index?: number) => {
     void openJob(job.id, index).catch((e) => notify(String(e), true));
   };
+  const deleteJob = async (job: Job) => {
+    if (!window.confirm(t("이 작업과 저장된 녹화 파일을 모두 삭제할까요?"))) {
+      return;
+    }
+    try {
+      await action(
+        `/jobs/${job.id}`,
+        "DELETE",
+        {},
+        "작업과 녹화 파일을 삭제했습니다.",
+      );
+      if (detail === job.id) setDetail(null);
+    } catch {
+      // action already displays the error.
+    }
+  };
   const jobs = snapshot?.jobs ?? [];
   const running = jobs.filter((j) => !isTerminal(j));
   const recordingCount = jobs.filter((j) => j.state === "recording").length;
@@ -577,6 +593,14 @@ export default function App() {
                         onClick={() => safeOpen(job)}
                       >
                         <FolderOpen size={19} />
+                      </button>
+                      <button
+                        className="icon-button danger"
+                        title={t("작업 삭제")}
+                        aria-label={t("작업 삭제")}
+                        onClick={() => void deleteJob(job)}
+                      >
+                        <Trash2 size={17} />
                       </button>
                       <button
                         className="button small"

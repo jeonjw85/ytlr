@@ -65,6 +65,17 @@ impl Store {
             &raw.context("녹화 작업을 찾을 수 없습니다.")?,
         )?)
     }
+    pub fn delete_job(&self, id: &str) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM events WHERE job_id=?", [id])?;
+        tx.execute("DELETE FROM replica_requests WHERE job_id=?", [id])?;
+        if tx.execute("DELETE FROM jobs WHERE id=?", [id])? == 0 {
+            bail!("녹화 작업을 찾을 수 없습니다.");
+        }
+        tx.commit()?;
+        Ok(())
+    }
     pub fn add_job(
         &self,
         request: &RecordRequest,
@@ -346,5 +357,24 @@ mod tests {
         assert_eq!(a.attempt, 2);
         assert!(a.continuity_uncertain);
         assert_eq!(db.recover_interrupted().unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_job_removes_job_and_events() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
+        let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
+        let req = RecordRequest {
+            url: "https://youtu.be/abcdefghijk".into(),
+            live_from_start: None,
+            priority: 0,
+        };
+        let job = db.add_job(&req, None, false).unwrap();
+        db.event(&job.id, "finished", "저장됨").unwrap();
+
+        db.delete_job(&job.id).unwrap();
+
+        assert!(db.job(&job.id).is_err());
+        assert!(db.jobs().unwrap().is_empty());
     }
 }

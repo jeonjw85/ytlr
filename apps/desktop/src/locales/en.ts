@@ -65,6 +65,14 @@ export const english: Record<string, string> = {
   "녹화 마무리 후 내보낼 수 있습니다.":
     "Export is available after finalization.",
   "녹화 작업을 찾을 수 없습니다.": "Recording not found.",
+  "진행 중인 녹화는 삭제할 수 없습니다.":
+    "Active recordings cannot be deleted.",
+  "녹화가 끝난 후 삭제할 수 있습니다.":
+    "The recording must finish before it can be deleted.",
+  "이 작업과 저장된 녹화 파일을 모두 삭제할까요?":
+    "Delete this job and all saved recording files?",
+  "작업과 녹화 파일을 삭제했습니다.": "Job and recording files deleted.",
+  "작업 삭제": "Delete job",
   "영상 파일을 찾을 수 없습니다.": "Video file not found.",
   "원격을 찾을 수 없습니다.": "Remote not found.",
   "연결 전환이 취소되었습니다.": "Device change cancelled.",
