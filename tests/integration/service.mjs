@@ -338,18 +338,26 @@ try {
     "30 second segment rotation",
   );
   const backupJob = join(backupRoot, ff.video_id, ff.id);
-  await until(async () => {
-    const listing = await readdir(backupJob).catch(() => []);
-    return (
-      listing.includes("recording.json") &&
-      listing.some((n) => n.startsWith("attempt-"))
-    );
-  }, "secondary disk backup");
+  await until(
+    async () => {
+      const listing = await readdir(backupJob).catch(() => []);
+      if (
+        listing.includes("recording.json") &&
+        listing.some((n) => n.startsWith("attempt-"))
+      )
+        return true;
+      const j = (await request("/snapshot")).jobs.find((j) => j.id === ff.id);
+      throw new Error(`${j?.backup?.state}: ${j?.backup?.message}`);
+    },
+    "secondary disk backup",
+    120,
+  );
   await until(
     async () =>
       (await request("/snapshot")).jobs.find((j) => j.id === ff.id).backup
         .state === "verified",
     "backup process exits while parent lifetime pipe remains open",
+    90,
   );
   const exported = await request(`/jobs/${ff.id}/export`, "POST", { index: 0 });
   await until(async () => {
