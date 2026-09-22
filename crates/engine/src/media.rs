@@ -73,6 +73,15 @@ pub async fn probe(tools: &Tools, path: &Path) -> Result<MediaOutput> {
     })
 }
 
+fn is_transient_scan_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::ResourceBusy
+    ) || matches!(err.raw_os_error(), Some(5 | 32 | 33 | 303))
+}
+
 pub fn files_under(root: &Path) -> Result<Vec<PathBuf>> {
     let mut found = vec![];
     if !root.exists() {
@@ -81,10 +90,14 @@ pub fn files_under(root: &Path) -> Result<Vec<PathBuf>> {
     let mut pending = vec![root.to_owned()];
     while let Some(dir) = pending.pop() {
         for entry in fs::read_dir(dir)? {
-            let entry = entry?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) if is_transient_scan_error(&e) => continue,
+                Err(e) => return Err(e.into()),
+            };
             let kind = match entry.file_type() {
                 Ok(kind) => kind,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if is_transient_scan_error(&e) => continue,
                 Err(e) => return Err(e.into()),
             };
             if kind.is_dir() {
@@ -112,7 +125,7 @@ pub fn checkpoint(root: &Path, known: &mut HashSet<PathBuf>) -> Result<u64> {
         let size = match fs::metadata(&path) {
             Ok(metadata) => metadata.len(),
             // Native downloads rename temporary files concurrently with our scan.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) if is_transient_scan_error(&e) => continue,
             Err(e) => return Err(e.into()),
         };
         if path != ledger {
@@ -126,7 +139,11 @@ pub fn checkpoint(root: &Path, known: &mut HashSet<PathBuf>) -> Result<u64> {
         if !complete_fragment || known.contains(&path) {
             continue;
         }
-        let mut f = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        let mut f = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(e) if is_transient_scan_error(&e) => continue,
+            Err(e) => return Err(e.into()),
+        };
         f.sync_all()?;
         let mut hash = Sha256::new();
         let mut buffer = [0u8; 64 * 1024];
