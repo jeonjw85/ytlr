@@ -78,6 +78,12 @@ export const english: Record<string, string> = {
   "연결 전환이 취소되었습니다.": "Device change cancelled.",
   "녹화 서비스에 연결할 수 없습니다.":
     "Cannot connect to the recording service.",
+  "녹화 서비스 응답을 읽지 못했습니다.":
+    "Could not read the recording service response.",
+  "요청 처리 실패": "The request could not be completed.",
+  "녹화 서비스가 이 앱과 호환되지 않습니다. 녹화를 마무리하고 `ytlr shutdown` 후 다시 실행하세요.":
+    "The recording service is not compatible with this app. Finish recordings, run `ytlr shutdown`, then start the app again.",
+  "지원하지 않는 요청": "This request is not supported.",
   "원격 녹화 서비스에 연결할 수 없습니다.":
     "Cannot connect to the remote recording service.",
   "이 플랫폼의 자동 엔진 설치는 아직 지원되지 않습니다.":

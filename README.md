@@ -1,10 +1,27 @@
+<div align="center">
+
 # YTLR
+
+[![Release](https://img.shields.io/github/v/release/jeonjw85/ytlr)](https://github.com/jeonjw85/ytlr/releases/latest)
+[![CI](https://github.com/jeonjw85/ytlr/actions/workflows/ci.yml/badge.svg)](https://github.com/jeonjw85/ytlr/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/jeonjw85/ytlr)](LICENSE)
+
+</div>
 
 YTLR is a durable live-stream recording application for macOS, Linux, and
 Windows. It keeps source media when a stream reconnects or a service is
 restarted, and provides both a Tauri desktop app and a command-line client.
 
 The project is currently at **0.2.1** and is in stabilization testing.
+
+<p align="center">
+  <img src="docs/recording.png" alt="YTLR recording a live stream" width="780">
+</p>
+<p align="center">
+  <img src="docs/home.png" alt="Recordings" width="250">
+  <img src="docs/channels.png" alt="Channels" width="250">
+  <img src="docs/library.png" alt="Library" width="250">
+</p>
 
 ## Highlights
 

@@ -12,6 +12,29 @@ fn compatible(version: &str) -> bool {
         .eq(env!("CARGO_PKG_VERSION").split('.').take(2))
 }
 
+fn version_mismatch(version: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "실행 중인 서비스 버전({})과 앱 버전({})이 다릅니다. 녹화를 마무리하고 `ytlr shutdown` 후 다시 실행하세요.",
+        version,
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+async fn decode_json(response: reqwest::Response) -> Result<Value> {
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .context("녹화 서비스 응답을 읽지 못했습니다.")?;
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) if status.is_success() => Ok(value),
+        Ok(value) => bail!("{}", value["error"].as_str().unwrap_or("요청 처리 실패")),
+        Err(_) => bail!(
+            "녹화 서비스가 이 앱과 호환되지 않습니다. 녹화를 마무리하고 `ytlr shutdown` 후 다시 실행하세요."
+        ),
+    }
+}
+
 #[derive(Clone)]
 pub struct Client {
     pub paths: AppPaths,
@@ -57,29 +80,23 @@ impl Client {
             bail!("잘못된 API 경로");
         }
         if path != "/health" && path != "/shutdown" && !compatible(&endpoint.version) {
-            bail!(
-                "실행 중인 서비스 버전({})과 앱 버전({})이 다릅니다. 녹화를 마무리하고 `ytlr shutdown` 후 다시 실행하세요.",
-                endpoint.version,
-                env!("CARGO_PKG_VERSION")
-            );
+            return Err(version_mismatch(&endpoint.version));
         }
+        let send_json = !matches!(method, Method::GET | Method::HEAD | Method::DELETE);
         let mut request = self
             .http
             .request(method, format!("http://127.0.0.1:{}{path}", endpoint.port))
             .bearer_auth(endpoint.token);
-        if let Some(body) = body {
+        if let Some(body) = body
+            && send_json
+        {
             request = request.json(body);
         }
         let response = request
             .send()
             .await
             .context("녹화 서비스에 연결할 수 없습니다.")?;
-        let status = response.status();
-        let value: Value = response.json().await?;
-        if !status.is_success() {
-            bail!("{}", value["error"].as_str().unwrap_or("요청 처리 실패"));
-        }
-        Ok(serde_json::from_value(value)?)
+        Ok(serde_json::from_value(decode_json(response).await?)?)
     }
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         self.request(Method::GET, path, None::<&Value>).await
@@ -109,15 +126,7 @@ impl Client {
             .send()
             .await
             .context("이중 녹화 원격에 연결할 수 없습니다.")?;
-        let status = response.status();
-        let value: Value = response.json().await?;
-        if !status.is_success() {
-            bail!(
-                "{}",
-                value["error"].as_str().unwrap_or("이중 녹화 요청 실패")
-            );
-        }
-        Ok(serde_json::from_value(value)?)
+        Ok(serde_json::from_value(decode_json(response).await?)?)
     }
     pub async fn ensure(&self, executable: &Path) -> Result<()> {
         if self.endpoint.is_some() {
@@ -200,5 +209,38 @@ mod tests {
         assert!(error.contains("버전"));
         assert!(!compatible("0.1.99"));
         assert!(compatible(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[tokio::test]
+    async fn empty_error_body_is_not_a_decode_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/jobs/{id}",
+                    axum::routing::get(|| async { axum::http::StatusCode::NOT_FOUND }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let d = tempfile::tempdir().unwrap();
+        let client = Client::new(AppPaths::resolve(Some(d.path().into())).unwrap())
+            .unwrap()
+            .with_endpoint(ServiceEndpoint {
+                port,
+                token: "unused".into(),
+                pid: 0,
+                version: env!("CARGO_PKG_VERSION").into(),
+            });
+        let error = client
+            .request::<Value>(Method::DELETE, "/jobs/abc", Some(&serde_json::json!({})))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.to_lowercase().contains("decoding"));
+        assert!(error.contains("shutdown"));
     }
 }

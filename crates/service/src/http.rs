@@ -50,6 +50,18 @@ pub fn router(state: Arc<Service>) -> Router {
         .route("/tools/rollback", post(rollback))
         .route("/tools/refresh", post(refresh))
         .route("/shutdown", post(shutdown))
+        .method_not_allowed_fallback(|| async {
+            (
+                StatusCode::METHOD_NOT_ALLOWED,
+                Json(json!({"error":"지원하지 않는 요청"})),
+            )
+        })
+        .fallback(|| async {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error":"요청 처리 실패"})),
+            )
+        })
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .with_state(state)
@@ -319,4 +331,136 @@ async fn refresh(State(s): State<Arc<Service>>) -> ApiResult<Value> {
 async fn shutdown(State(s): State<Arc<Service>>) -> ApiResult<Value> {
     s.shutdown.cancel();
     Ok(Json(json!({"ok":true})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::Client;
+    use std::{collections::HashMap, sync::atomic::AtomicBool};
+    use tokio::sync::{Mutex, RwLock, Semaphore};
+    use tokio_util::sync::CancellationToken;
+    use tower::ServiceExt;
+    use ytlr_engine::Tools;
+
+    fn service() -> (Arc<Service>, tempfile::TempDir) {
+        let d = tempfile::tempdir().unwrap();
+        let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
+        paths.initialize().unwrap();
+        let store = Arc::new(Store::open(&paths.database(), &paths.default_settings()).unwrap());
+        (
+            Arc::new(Service {
+                tools: Tools::new(paths.clone()),
+                store,
+                paths,
+                token: "test-token".into(),
+                shutdown: CancellationToken::new(),
+                active: Mutex::new(HashMap::new()),
+                next_checks: Mutex::new(HashMap::new()),
+                finalizer: Semaphore::new(1),
+                gap_recovery: Semaphore::new(1),
+                tool_status: RwLock::new(vec![]),
+                installing: AtomicBool::new(false),
+                tool_message: RwLock::new(None),
+            }),
+            d,
+        )
+    }
+
+    fn completed_job(state: &Service) -> RecordingJob {
+        let job = state
+            .store
+            .add_job(
+                &RecordRequest {
+                    url: "https://youtu.be/abcdefghijk".into(),
+                    live_from_start: None,
+                    priority: 0,
+                },
+                None,
+                false,
+            )
+            .unwrap();
+        std::fs::create_dir_all(&job.output_dir).unwrap();
+        std::fs::write(job.output_dir.join("clip.mkv"), b"data").unwrap();
+        state
+            .store
+            .update_job(&job.id, |j| j.state = JobState::Completed)
+            .unwrap()
+    }
+
+    async fn send(
+        state: Arc<Service>,
+        method: &str,
+        uri: &str,
+        body: &'static str,
+    ) -> (StatusCode, String) {
+        let response = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn delete_job_removes_record_and_files() {
+        let (state, _d) = service();
+        let job = completed_job(&state);
+        let output = job.output_dir.clone();
+        let (status, body) =
+            send(state.clone(), "DELETE", &format!("/jobs/{}", job.id), "{}").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("deleted"));
+        assert!(state.store.job(&job.id).is_err());
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn unknown_route_returns_json() {
+        let (state, _d) = service();
+        let (status, body) = send(state, "DELETE", "/jobs/missing/extra", "{}").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("error"));
+    }
+
+    #[tokio::test]
+    async fn client_delete_with_json_body_succeeds() {
+        let (state, d) = service();
+        let job = completed_job(&state);
+        let output = job.output_dir.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        let client = Client::new(AppPaths::resolve(Some(d.path().to_owned())).unwrap())
+            .unwrap()
+            .with_endpoint(ServiceEndpoint {
+                port,
+                token: "test-token".into(),
+                pid: 0,
+                version: env!("CARGO_PKG_VERSION").into(),
+            });
+        let value: Value = client
+            .request(
+                reqwest::Method::DELETE,
+                &format!("/jobs/{}", job.id),
+                Some(&json!({})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(value["deleted"], true);
+        assert!(!output.exists());
+    }
 }
