@@ -1,0 +1,16 @@
+[Unit]
+Description=YTLiveRecord recording service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/ytlr run --headless
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+KillMode=mixed
+UMask=0077
+
+[Install]
+WantedBy=default.target

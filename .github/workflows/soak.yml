@@ -1,0 +1,36 @@
+name: real-time-soak
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Local HLS duration (120 to 10800 seconds; run 24/72h locally)"
+        required: true
+        default: "600"
+permissions:
+  contents: read
+jobs:
+  soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: cargo build -p ytlr
+      - name: Run bounded soak
+        env:
+          SOAK_SECONDS: ${{ inputs.seconds }}
+        run: |
+          node -e 'const n=Number(process.env.SOAK_SECONDS); if(!Number.isInteger(n)||n<120||n>10800) process.exit(1)'
+          node tests/integration/soak.mjs --seconds "$SOAK_SECONDS"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-report
+          path: |
+            /tmp/ytlr-soak-*/report.json
+            /tmp/ytlr-soak-*/samples.jsonl

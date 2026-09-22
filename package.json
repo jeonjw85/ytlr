@@ -1,0 +1,19 @@
+{
+  "name": "ytliverecord",
+  "version": "0.2.0",
+  "private": true,
+  "packageManager": "pnpm@11.20.0",
+  "scripts": {
+    "dev": "node packaging/prepare.mjs --debug && pnpm --dir apps/desktop tauri dev",
+    "build": "node packaging/prepare.mjs && pnpm --dir apps/desktop tauri build",
+    "check": "pnpm --dir apps/desktop check",
+    "test": "pnpm --dir apps/desktop test",
+    "test:integration": "node tests/integration/service.mjs",
+    "test:remote": "node tests/integration/remote.mjs",
+    "test:soak": "node tests/integration/soak.mjs",
+    "test:ui": "playwright test --config tests/ui/playwright.config.ts",
+    "format": "prettier --write 'apps/desktop/src/**/*.{ts,tsx,css}' 'packaging/*.mjs' 'tests/**/*.{mjs,ts}'",
+    "prepare:desktop": "node packaging/prepare.mjs --debug"
+  },
+  "devDependencies": { "@playwright/test": "^1.58.0", "prettier": "^3.6.0" }
+}

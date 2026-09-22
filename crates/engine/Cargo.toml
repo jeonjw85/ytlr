@@ -1,0 +1,28 @@
+[package]
+name = "ytlr-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ytlr-core = { path = "../core" }
+anyhow.workspace = true
+chrono.workspace = true
+csv.workspace = true
+futures-util.workspace = true
+fs2.workspace = true
+hex.workspace = true
+libc.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+zip.workspace = true
+url.workspace = true
+tar.workspace = true
+xz2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

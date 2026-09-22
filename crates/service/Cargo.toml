@@ -1,0 +1,22 @@
+[package]
+name = "ytlr-service"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ytlr-core = { path = "../core" }
+ytlr-engine = { path = "../engine" }
+anyhow.workspace = true
+chrono.workspace = true
+axum.workspace = true
+fs2.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true

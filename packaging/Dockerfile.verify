@@ -1,0 +1,11 @@
+FROM node:22-bookworm AS node
+FROM rust:1.97-bookworm
+COPY --from=node /usr/local/ /usr/local/
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg openssh-server procps && mkdir -p /run/sshd && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY apps/desktop/src-tauri ./apps/desktop/src-tauri
+COPY tests ./tests
+RUN cargo build -p ytlr && cargo build --release -p ytlr
+CMD ["bash", "-c", "rustc --version && uname -m && cargo test && cargo test -p ytlr-engine --test recovery -- --ignored && node tests/integration/service.mjs && node tests/integration/remote.mjs"]

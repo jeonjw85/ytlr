@@ -1,0 +1,12 @@
+target
+node_modules
+**/node_modules
+apps/desktop/dist
+apps/desktop/src-tauri/binaries
+apps/desktop/src-tauri/resources
+apps/desktop/src-tauri/icons
+apps/desktop/src-tauri/gen
+packaging/.engine-cache
+packaging/.ffmpeg-source
+test-results
+.git

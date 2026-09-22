@@ -1,0 +1,32 @@
+/target/
+**/node_modules/
+/apps/desktop/dist/
+/apps/desktop/src-tauri/binaries/
+/apps/desktop/src-tauri/resources/tools/
+/apps/desktop/src-tauri/gen/
+/packaging/.engine-cache/
+/packaging/.ffmpeg-source/
+.DS_Store
+*.log
+.env
+/test-output/
+/test-results/
+/playwright-report/
+
+# Project documentation intentionally excluded from this initial source commit.
+**/README.md
+**/README.*
+
+# Agent/editor instruction and local AI configuration.
+AGENTS.md
+**/AGENTS.md
+CLAUDE.md
+**/CLAUDE.md
+.cursor/
+**/.cursor/
+.opencode/
+**/.opencode/
+.omo/
+**/.omo/
+.windsurf/
+**/.windsurf/
