@@ -2,6 +2,8 @@
 
 # YTLR
 
+Youtube Live Record
+
 [![Release](https://img.shields.io/github/v/release/jeonjw85/ytlr)](https://github.com/jeonjw85/ytlr/releases/latest)
 [![CI](https://github.com/jeonjw85/ytlr/actions/workflows/ci.yml/badge.svg)](https://github.com/jeonjw85/ytlr/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/github/license/jeonjw85/ytlr)](LICENSE)
