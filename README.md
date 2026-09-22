@@ -12,7 +12,7 @@ YTLR is a durable live-stream recording application for macOS, Linux, and
 Windows. It keeps source media when a stream reconnects or a service is
 restarted, and provides both a Tauri desktop app and a command-line client.
 
-The project is currently at **0.2.1** and is in stabilization testing.
+The project is currently at **0.2.2** and is in stabilization testing.
 
 <p align="center">
   <img src="docs/recording.png" alt="YTLR recording a live stream" width="780">
