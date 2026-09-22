@@ -24,6 +24,8 @@ pub async fn run(state: Arc<Service>) {
         for job in jobs.into_iter().filter(|j| j.attempt > 0) {
             let wait = if job.state.terminal() && job.backup.state == "verified" {
                 300
+            } else if job.backup.state == "failed" {
+                2
             } else {
                 10
             };

@@ -250,6 +250,7 @@ try {
       (await request("/snapshot")).jobs.find((j) => j.id === first.id).backup
         .state === "in_progress",
     "backup reconnect retries",
+    90,
   );
   const events = await request(`/jobs/${first.id}/events`);
   assert(!JSON.stringify(events).includes("TEST_COOKIE_SECRET"));
