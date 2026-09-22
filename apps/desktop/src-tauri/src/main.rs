@@ -20,6 +20,22 @@ struct Bridge {
     session: Mutex<Session>,
 }
 
+struct TrayLabels {
+    show: tauri::menu::MenuItem<tauri::Wry>,
+    quit: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+#[tauri::command]
+fn set_ui_language(labels: State<'_, TrayLabels>, language: String) -> Result<(), String> {
+    let (show, quit) = match language.as_str() {
+        "en" => ("Open YTLR", "Quit app (keep recording)"),
+        "ko" => ("YTLR 열기", "앱 종료 (녹화 유지)"),
+        _ => return Err("Unsupported language".into()),
+    };
+    labels.show.set_text(show).map_err(|e| e.to_string())?;
+    labels.quit.set_text(quit).map_err(|e| e.to_string())
+}
+
 #[derive(Default)]
 struct Session {
     name: Option<String>,
@@ -266,10 +282,11 @@ fn main() {
                 session: Mutex::new(Session::default()),
             });
             use tauri::menu::{Menu, MenuItem};
-            let show = MenuItem::with_id(app, "show", "YTLiveRecord 열기", true, None::<&str>)?;
+            let show = MenuItem::with_id(app, "show", "Open YTLR", true, None::<&str>)?;
             let quit =
-                MenuItem::with_id(app, "quit", "창 앱 종료 (녹화 유지)", true, None::<&str>)?;
+                MenuItem::with_id(app, "quit", "Quit app (keep recording)", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
+            app.manage(TrayLabels { show, quit });
             let mut rgba = vec![0u8; 20 * 20 * 4];
             for y in 0..20 {
                 for x in 0..20 {
@@ -281,7 +298,7 @@ fn main() {
             }
             tauri::tray::TrayIconBuilder::new()
                 .icon(tauri::image::Image::new_owned(rgba, 20, 20))
-                .tooltip("YTLiveRecord · 백그라운드 녹화")
+                .tooltip("YTLR")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
@@ -308,6 +325,7 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            set_ui_language,
             api,
             open_job,
             save_diagnostics,

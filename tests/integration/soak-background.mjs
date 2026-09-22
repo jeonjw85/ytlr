@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 const home = await mkdtemp(join(tmpdir(), "ytlr-soak-24h-"));
 const tools = resolve(
-  "target/release/bundle/macos/YTLiveRecord.app/Contents/Resources/tools",
+  "target/release/bundle/macos/YTLR.app/Contents/Resources/tools",
 );
 for (const name of ["ffmpeg", "ffprobe"]) {
   await copyFile(join(tools, name), join(home, name));

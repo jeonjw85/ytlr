@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 if (process.platform !== "darwin")
   throw new Error("This native smoke test targets macOS");
 const home = await mkdtemp(join(tmpdir(), "ytlr-packaged-"));
-const bundle = resolve("target/release/bundle/macos/YTLiveRecord.app");
+const bundle = resolve("target/release/bundle/macos/YTLR.app");
 const app = spawn(join(bundle, "Contents/MacOS/ytlr-desktop"), [], {
   env: {
     ...process.env,

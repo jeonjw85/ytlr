@@ -1,6 +1,6 @@
 # External tools
 
-The MIT license at the repository root covers YTLiveRecord's own code. External
+The MIT license at the repository root covers YTLR's own code. External
 executables retain their own licenses. They run as separate processes.
 
 | Tool | Pinned release | Upstream / source | License |
