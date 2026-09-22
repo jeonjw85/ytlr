@@ -153,14 +153,6 @@ async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationTok
     })?;
     if state.store.job(&job.id)?.stop_requested {
         finish(&state, &job.id, false).await?;
-        state.store.update_job(&job.id, |j| {
-            j.state = if j.outputs.is_empty() {
-                JobState::Stopped
-            } else {
-                JobState::Partial
-            };
-            j.message = "사용자 중지 · 저장된 원본과 복구 가능한 구간 보존".into();
-        })?;
     } else if cancel.is_cancelled() {
         interrupted_state(&state, &job.id)?;
     } else if result.success && !result.interrupted {
@@ -328,8 +320,10 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
         .iter()
         .filter(|gap| gap.status != GapStatus::Recovered)
         .count();
+    let stopped = job.stop_requested;
     let complete = integrity_ok
         && natural_end
+        && !stopped
         && !job.continuity_uncertain
         && job.attempt == 1
         && open_gaps == 0
@@ -341,6 +335,8 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
         j.continuity_uncertain |= open_gaps > 0;
         j.state = if complete {
             JobState::Completed
+        } else if stopped {
+            JobState::Stopped
         } else if j.attempt > 0 {
             JobState::Partial
         } else {
@@ -348,6 +344,8 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
         };
         j.message = if complete {
             "수집 종료 · 컨테이너·영상·음성 검사 통과 (전체 디코딩 검사는 미실행)".into()
+        } else if stopped {
+            "중지했습니다. 저장된 파일은 보관됩니다.".into()
         } else if open_gaps > 0 {
             format!("부분 보관 · 수신 공백/경계 미검증 {open_gaps}구간 · 원본 보존")
         } else {

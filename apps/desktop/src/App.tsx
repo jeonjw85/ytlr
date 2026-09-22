@@ -630,7 +630,7 @@ export default function App() {
       {add && add !== "remote" && (
         <AddDialog
           kind={add}
-          fromStart={snapshot?.settings.live_from_start ?? true}
+          fromStart={snapshot?.settings.live_from_start ?? false}
           onClose={() => setAdd(null)}
           onSubmit={async (path, body) => {
             await action(path, "POST", body);
@@ -737,7 +737,7 @@ function Badge({ job }: { job: Job }) {
     <span className={`badge ${job.state}`}>
       {job.state === "recording" ? (
         <span className="live-dot" />
-      ) : job.state === "completed" ? (
+      ) : job.state === "completed" || job.state === "stopped" ? (
         <Check size={12} />
       ) : job.state === "reconnecting" ? (
         <RefreshCw size={12} />

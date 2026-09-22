@@ -16,6 +16,7 @@ export const english: Record<string, string> = {
   "원본 검사·복구 중": "Checking and recovering source files",
   "사용자가 중지했습니다. 기존 원본은 보존됩니다.":
     "Stopped by user. Existing source files are retained.",
+  "중지했습니다. 저장된 파일은 보관됩니다.": "Stopped. Saved files were kept.",
   "사용자 중지 · 저장된 원본과 복구 가능한 구간 보존":
     "Stopped by user · source files and recoverable segments retained",
   "사용자 중지 또는 서비스 종료": "Stopped by user or service shutdown",
@@ -151,6 +152,7 @@ export const english: Record<string, string> = {
   완료: "Completed",
   "부분 보관": "Partially saved",
   중지됨: "Stopped",
+  저장됨: "Saved",
   "확인 필요": "Needs attention",
   "확인 중": "Checking",
   "경과 시간": "Elapsed",

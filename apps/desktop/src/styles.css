@@ -420,7 +420,8 @@ main {
   background: #3a1f1d;
   color: #f0b4af;
 }
-.badge.completed {
+.badge.completed,
+.badge.stopped {
   background: #1c3228;
   color: #8fd0ae;
 }

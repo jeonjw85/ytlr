@@ -147,7 +147,7 @@ export const stateLabels: Record<JobState, string> = {
   finalizing: "검증·마무리",
   completed: "완료",
   partial: "부분 보관",
-  stopped: "중지됨",
+  stopped: "저장됨",
   failed: "확인 필요",
 };
 export const isTerminal = (job: Job) =>

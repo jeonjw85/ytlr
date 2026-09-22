@@ -158,7 +158,7 @@ test("GUI persists language and controls the real Rust service: create, deduplic
   await expect(page.locator(".job-card")).toHaveCount(0);
   await page.getByRole("button", { name: "보관함", exact: true }).click();
   await expect(page.locator(".library-row")).toHaveCount(1);
-  await expect(page.getByText("중지됨", { exact: true })).toBeVisible();
+  await expect(page.getByText("저장됨", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "채널", exact: true }).click();
   await page
     .getByRole("button", { name: "채널 추가", exact: true })

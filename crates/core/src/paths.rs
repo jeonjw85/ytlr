@@ -65,7 +65,7 @@ impl AppPaths {
             stall_timeout_secs: 120,
             min_free_bytes: 5 * 1024 * 1024 * 1024,
             max_retries: 8,
-            live_from_start: true,
+            live_from_start: false,
             notifications: true,
             close_to_tray: true,
             backup_root: None,

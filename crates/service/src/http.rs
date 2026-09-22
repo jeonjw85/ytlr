@@ -105,7 +105,7 @@ async fn stop(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResul
         j.stop_requested = true;
         if !running && !j.state.terminal() {
             j.state = JobState::Stopped;
-            j.message = "사용자가 중지했습니다. 기존 원본은 보존됩니다.".into();
+            j.message = "중지했습니다. 저장된 파일은 보관됩니다.".into();
         }
     })?;
     if let Some(cancel) = active.get(&id) {
