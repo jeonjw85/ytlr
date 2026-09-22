@@ -1,7 +1,7 @@
-# YTLiveRecord
+# YTLR
 
-YTLiveRecord is a durable live-stream recording application for macOS, Linux,
-and Windows. It keeps source media when a stream reconnects or a service is
+YTLR is a durable live-stream recording application for macOS, Linux, and
+Windows. It keeps source media when a stream reconnects or a service is
 restarted, and provides both a Tauri desktop app and a command-line client.
 
 The project is currently at **0.2.0** and is in stabilization testing.
@@ -90,7 +90,7 @@ stopped can resume on the next service start.
 
 Use `--data-dir PATH` or `YTLR_HOME` to run an isolated data and service
 instance. The macOS app bundle includes the CLI at
-`YTLiveRecord.app/Contents/MacOS/ytlr`.
+`YTLR.app/Contents/MacOS/ytlr`.
 
 ## Recording Semantics
 
@@ -135,7 +135,7 @@ media can be reconstructed.
 
 ## Backups and Remote Control
 
-The backup destination must already exist. YTLiveRecord identifies the volume,
+The backup destination must already exist. YTLR identifies the volume,
 publishes a finalized file list only after every copy is verified, and repairs
 same-size files whose hashes differ. Backup failures do not stop recording.
 

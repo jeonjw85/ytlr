@@ -9,7 +9,7 @@ use ytlr_service::client::Client;
 #[command(
     name = "ytlr",
     version,
-    about = "YTLiveRecord — 복구 가능한 유튜브 라이브 녹화"
+    about = "YTLR — 복구 가능한 유튜브 라이브 녹화"
 )]
 struct Args {
     #[arg(long, global = true)]
@@ -336,7 +336,7 @@ async fn execute() -> Result<()> {
                 print_json(&data)?;
             } else {
                 println!(
-                    "YTLiveRecord {} · 작업 {}개 · 동시 녹화 상한 {}",
+                    "YTLR {} · 작업 {}개 · 동시 녹화 상한 {}",
                     data.version,
                     data.jobs.len(),
                     data.settings.max_recordings
