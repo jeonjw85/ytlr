@@ -221,7 +221,10 @@ try {
       replica_remote: target,
     });
   }
-  const request = { url: "https://youtu.be/abcdefghijk" };
+  const request = {
+    url: "https://youtu.be/abcdefghijk",
+    live_from_start: true,
+  };
   const initial = await api(a, "/jobs", "POST", request);
   await Promise.all(
     Array.from({ length: 12 }, () => api(a, "/jobs", "POST", request)),
