@@ -5782,7 +5782,7 @@ dependencies = [
 
 [[package]]
 name = "ytlr"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -5797,7 +5797,7 @@ dependencies = [
 
 [[package]]
 name = "ytlr-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5815,7 +5815,7 @@ dependencies = [
 
 [[package]]
 name = "ytlr-desktop"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -5833,7 +5833,7 @@ dependencies = [
 
 [[package]]
 name = "ytlr-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5859,7 +5859,7 @@ dependencies = [
 
 [[package]]
 name = "ytlr-service"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",

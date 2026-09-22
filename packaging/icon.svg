@@ -1,34 +1,31 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="surface" x1="120" y1="80" x2="900" y2="950" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#24223b" />
-      <stop offset="1" stop-color="#111827" />
+    <linearGradient id="surface" x1="176" y1="94" x2="844" y2="938" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38383a"/>
+      <stop offset=".5" stop-color="#242426"/>
+      <stop offset="1" stop-color="#111112"/>
     </linearGradient>
-    <linearGradient id="signal" x1="160" y1="250" x2="870" y2="770" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#ffb0bd" />
-      <stop offset="1" stop-color="#e66c91" />
+    <radialGradient id="light" cx="0" cy="0" r="1" gradientTransform="translate(330 210) rotate(47) scale(650)">
+      <stop stop-color="#fff" stop-opacity=".13"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="record" x1="426" y1="404" x2="606" y2="622" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff665c"/>
+      <stop offset="1" stop-color="#d52f28"/>
     </linearGradient>
-    <linearGradient id="mark" x1="430" y1="290" x2="600" y2="760" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#fff5ef" />
-      <stop offset="1" stop-color="#ffd9d1" />
-    </linearGradient>
-    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="18" result="blur" />
-      <feMerge>
-        <feMergeNode in="blur" />
-        <feMergeNode in="SourceGraphic" />
-      </feMerge>
+    <filter id="dot-shadow" x="-40%" y="-40%" width="180%" height="190%">
+      <feDropShadow dx="0" dy="22" stdDeviation="28" flood-color="#000" flood-opacity=".38"/>
     </filter>
   </defs>
-  <rect x="32" y="32" width="960" height="960" rx="226" fill="url(#surface)" />
-  <rect x="33" y="33" width="958" height="958" rx="225" fill="none" stroke="#8f668f" stroke-opacity=".55" stroke-width="3" />
-  <g fill="none" stroke="url(#signal)" stroke-linecap="round" stroke-width="58">
-    <path d="M266 292c-92 92-92 348 0 440" />
-    <path d="M168 194c-148 148-148 488 0 636" opacity=".72" />
-    <path d="M758 292c92 92 92 348 0 440" />
-    <path d="M856 194c148 148 148 488 0 636" opacity=".72" />
+  <rect x="32" y="32" width="960" height="960" rx="226" fill="url(#surface)"/>
+  <rect x="32" y="32" width="960" height="960" rx="226" fill="url(#light)"/>
+  <rect x="34" y="34" width="956" height="956" rx="222" fill="none" stroke="#fff" stroke-opacity=".16" stroke-width="4"/>
+  <g fill="none" stroke="#f5f3ef" stroke-linecap="round" stroke-linejoin="round" stroke-width="46">
+    <path d="M390 278h-62c-28 0-50 22-50 50v62"/>
+    <path d="M634 278h62c28 0 50 22 50 50v62"/>
+    <path d="M390 746h-62c-28 0-50-22-50-50v-62"/>
+    <path d="M634 746h62c28 0 50-22 50-50v-62"/>
   </g>
-  <path d="M401 307 512 432l111-125" fill="none" stroke="url(#mark)" stroke-linecap="round" stroke-linejoin="round" stroke-width="74" filter="url(#glow)" />
-  <path d="M512 433v286" fill="none" stroke="url(#mark)" stroke-linecap="round" stroke-width="74" filter="url(#glow)" />
-  <circle cx="512" cy="433" r="24" fill="#fff" opacity=".9" />
+  <circle cx="512" cy="512" r="112" fill="url(#record)" filter="url(#dot-shadow)"/>
+  <circle cx="482" cy="476" r="46" fill="#fff" opacity=".12"/>
 </svg>

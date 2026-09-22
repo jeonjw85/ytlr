@@ -1,16 +1,31 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="bg" x1="160" y1="80" x2="860" y2="960" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#2a2a2a"/>
-      <stop offset="1" stop-color="#141414"/>
+    <linearGradient id="surface" x1="176" y1="94" x2="844" y2="938" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38383a"/>
+      <stop offset=".5" stop-color="#242426"/>
+      <stop offset="1" stop-color="#111112"/>
     </linearGradient>
-    <linearGradient id="rec" x1="400" y1="300" x2="640" y2="740" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#d14a40"/>
-      <stop offset="1" stop-color="#b4332c"/>
+    <radialGradient id="light" cx="0" cy="0" r="1" gradientTransform="translate(330 210) rotate(47) scale(650)">
+      <stop stop-color="#fff" stop-opacity=".13"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="record" x1="426" y1="404" x2="606" y2="622" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff665c"/>
+      <stop offset="1" stop-color="#d52f28"/>
     </linearGradient>
+    <filter id="dot-shadow" x="-40%" y="-40%" width="180%" height="190%">
+      <feDropShadow dx="0" dy="22" stdDeviation="28" flood-color="#000" flood-opacity=".38"/>
+    </filter>
   </defs>
-  <rect x="32" y="32" width="960" height="960" rx="226" fill="url(#bg)"/>
-  <rect x="33" y="33" width="958" height="958" rx="225" fill="none" stroke="#3a3a3a" stroke-width="3"/>
-  <circle cx="512" cy="512" r="236" fill="none" stroke="#ececec" stroke-width="44"/>
-  <circle cx="512" cy="512" r="156" fill="url(#rec)"/>
+  <rect x="32" y="32" width="960" height="960" rx="226" fill="url(#surface)"/>
+  <rect x="32" y="32" width="960" height="960" rx="226" fill="url(#light)"/>
+  <rect x="34" y="34" width="956" height="956" rx="222" fill="none" stroke="#fff" stroke-opacity=".16" stroke-width="4"/>
+  <g fill="none" stroke="#f5f3ef" stroke-linecap="round" stroke-linejoin="round" stroke-width="46">
+    <path d="M390 278h-62c-28 0-50 22-50 50v62"/>
+    <path d="M634 278h62c28 0 50 22 50 50v62"/>
+    <path d="M390 746h-62c-28 0-50-22-50-50v-62"/>
+    <path d="M634 746h62c28 0 50-22 50-50v-62"/>
+  </g>
+  <circle cx="512" cy="512" r="112" fill="url(#record)" filter="url(#dot-shadow)"/>
+  <circle cx="482" cy="476" r="46" fill="#fff" opacity=".12"/>
 </svg>
