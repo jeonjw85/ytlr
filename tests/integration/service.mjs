@@ -177,6 +177,7 @@ try {
   });
   const first = await request("/jobs", "POST", {
     url: "https://youtu.be/abcdefghijk",
+    live_from_start: true,
   });
   const duplicate = await request("/jobs", "POST", {
     url: "https://youtube.com/live/abcdefghijk",
