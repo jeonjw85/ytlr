@@ -33,7 +33,14 @@ impl Rate {
 }
 
 fn status(path: PathBuf, reserve: u64, rate: Option<f64>) -> StorageStatus {
-    let free = ytlr_core::available_space(&path).ok();
+    let (free, total) = if path.is_dir() {
+        (
+            ytlr_core::available_space(&path).ok(),
+            fs2::total_space(&path).ok(),
+        )
+    } else {
+        (None, None)
+    };
     let remaining = free
         .zip(rate)
         .map(|(free, rate)| free.saturating_sub(reserve) as f64 / rate);
@@ -41,7 +48,7 @@ fn status(path: PathBuf, reserve: u64, rate: Option<f64>) -> StorageStatus {
         .is_some_and(|free| free <= reserve.saturating_mul(2).max(5 * 1024_u64.pow(3)))
         || remaining.is_some_and(|seconds| seconds <= 30.0 * 60.0);
     StorageStatus {
-        total_bytes: fs2::total_space(&path).ok(),
+        total_bytes: total,
         path,
         free_bytes: free,
         bytes_per_second: rate,
