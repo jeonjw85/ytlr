@@ -100,13 +100,13 @@ if (args.includes("--dump-single-json")) {
           : [
               {
                 format_id: "video",
-                url: "https://example.invalid/v",
+                url: process.env.YTLR_FIXTURE_MEDIA,
                 vcodec: "h264",
                 acodec: "none",
               },
               {
                 format_id: "audio",
-                url: "https://example.invalid/a",
+                url: process.env.YTLR_FIXTURE_MEDIA,
                 vcodec: "none",
                 acodec: "aac",
               },
