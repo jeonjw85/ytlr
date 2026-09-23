@@ -181,6 +181,7 @@ test("GUI persists language and controls the real Rust service: create, deduplic
   ).toBeVisible({ timeout: 15000 });
   await page.getByRole("button", { name: "새 녹화", exact: true }).click();
   await page.getByLabel("영상 URL").fill("https://youtu.be/abcdefghijk");
+  await page.getByLabel("최대 화질").selectOption("720");
   await page.getByRole("button", { name: "추가하기", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.locator(".job-card")).toHaveCount(1);

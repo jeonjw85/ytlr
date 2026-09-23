@@ -421,7 +421,7 @@ impl Store {
                     j.continuity_uncertain = true;
                 })?;
             }
-            if job.state.active() {
+            if job.state.active() && !(job.state == JobState::Finalizing && job.stop_requested) {
                 self.update_job(&job.id, |j| {
                     j.state = if j.stop_requested && j.attempt > 0 {
                         JobState::Finalizing
@@ -613,7 +613,7 @@ mod tests {
         let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
         assert_eq!(db.recover_interrupted().unwrap(), 1);
         let a = db.job(&a.id).unwrap();
-        assert_eq!(a.state, JobState::Stopped);
+        assert_eq!(a.state, JobState::Finalizing);
         assert_eq!(a.bytes, 322);
         assert_eq!(a.attempt, 2);
         assert!(a.continuity_uncertain);

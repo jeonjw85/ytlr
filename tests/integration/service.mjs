@@ -204,6 +204,10 @@ try {
   });
   const duplicate = await request("/jobs", "POST", {
     url: "https://youtube.com/live/abcdefghijk",
+    live_from_start: first.live_from_start,
+    recording_options: first.recording_options,
+    stop_at: first.stop_at,
+    priority: first.priority,
   });
   assert.equal(first.id, duplicate.id, "duplicate URL canonicalization");
   const second = await request("/jobs", "POST", {

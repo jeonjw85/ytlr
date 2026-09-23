@@ -93,21 +93,20 @@ async fn authorize(State(state): State<Arc<Service>>, req: Request, next: Next) 
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u32>().ok())
             != Some(SERVICE_API_VERSION);
-    if wrong_api_version
-        || req.headers().contains_key("origin")
+    let unauthorized = req.headers().contains_key("origin")
         || req
             .headers()
             .get("authorization")
             .and_then(|h| h.to_str().ok())
-            != Some(&format!("Bearer {}", state.token))
-    {
+            != Some(&format!("Bearer {}", state.token));
+    if unauthorized || wrong_api_version {
         return (
-            if wrong_api_version {
-                StatusCode::UPGRADE_REQUIRED
-            } else {
+            if unauthorized {
                 StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::UPGRADE_REQUIRED
             },
-            Json(json!({"error":if wrong_api_version {"서비스 API 버전이 호환되지 않습니다."} else {"인증되지 않은 로컬 요청"}})),
+            Json(json!({"error":if unauthorized {"인증되지 않은 로컬 요청"} else {"서비스 API 버전이 호환되지 않습니다."}})),
         )
             .into_response();
     }
@@ -461,7 +460,8 @@ async fn channel_update(
         .find(|channel| channel.id == id)
         .ok_or_else(|| anyhow::anyhow!("채널을 찾을 수 없습니다."))?;
     if let Some(value) = body.get("url") {
-        channel.url = channel_url(serde_json::from_value(value.clone())?)?;
+        let url: String = serde_json::from_value(value.clone())?;
+        channel.url = channel_url(&url)?;
     }
     if let Some(value) = body.get("name") {
         channel.name = serde_json::from_value(value.clone())?;
