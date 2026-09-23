@@ -135,6 +135,9 @@ enum RemoteAction {
         known_hosts: Option<PathBuf>,
         #[arg(long)]
         executable: Option<String>,
+        /// Replace an existing remote with the same name.
+        #[arg(long)]
+        force: bool,
     },
     List,
     Remove {
@@ -259,8 +262,17 @@ async fn execute() -> Result<()> {
                 identity,
                 known_hosts,
                 executable,
+                force,
             } => {
-                remotes.retain(|r| r.name != name);
+                if remotes.iter().any(|remote| remote.name == name) && !force {
+                    bail!(
+                        "원격 '{}'이(가) 이미 존재합니다. 교체하려면 --force를 사용하세요.",
+                        name
+                    );
+                }
+                if force {
+                    remotes.retain(|r| r.name != name);
+                }
                 let remote = Remote {
                     id: name.clone(),
                     name,
