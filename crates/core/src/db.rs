@@ -102,6 +102,8 @@ impl Store {
         automatic: bool,
         key: Option<&str>,
     ) -> Result<RecordingJob> {
+        request.recording_options.validate()?;
+        let stop_at = normalize_stop_at(request.stop_at.as_deref())?;
         let (url, video_id) = video_url(&request.url)?;
         let settings = self.settings()?;
         let mut conn = self.lock()?;
@@ -124,6 +126,18 @@ impl Store {
             }
         }
         if let Some(job) = matching {
+            let requested_live_from_start =
+                request.live_from_start.unwrap_or(settings.live_from_start);
+            if !automatic
+                && (job.recording_options != request.recording_options
+                    || job.live_from_start != requested_live_from_start
+                    || job.stop_at != stop_at
+                    || job.priority != request.priority)
+            {
+                bail!(
+                    "같은 방송의 진행 중인 작업이 다른 녹화 옵션으로 이미 존재합니다. 기존 작업을 중지한 뒤 다시 추가하세요."
+                );
+            }
             if let Some(key) = key {
                 tx.execute(
                     "INSERT INTO replica_requests VALUES(?,?)",
@@ -136,6 +150,11 @@ impl Store {
         let id = uuid::Uuid::new_v4().to_string();
         let at = now();
         let job = RecordingJob {
+            stop_at,
+            bookmarks: vec![],
+            alerts: vec![],
+            recovery_error: None,
+            recording_options: request.recording_options.clone(),
             output_dir: settings.storage_root.join(format!("{video_id}_{id}")),
             id,
             url,
@@ -150,6 +169,7 @@ impl Store {
             started_at: None,
             last_media_at: None,
             format: String::new(),
+            resolution: None,
             bytes: 0,
             media_seconds: 0.0,
             attempt: 0,
@@ -184,11 +204,22 @@ impl Store {
         id: &str,
         change: impl FnOnce(&mut RecordingJob),
     ) -> Result<RecordingJob> {
+        self.update_job_checked(id, |job| {
+            change(job);
+            Ok(())
+        })
+    }
+
+    pub fn update_job_checked(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut RecordingJob) -> Result<()>,
+    ) -> Result<RecordingJob> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let raw: String = tx.query_row("SELECT body FROM jobs WHERE id=?", [id], |r| r.get(0))?;
         let mut job: RecordingJob = serde_json::from_str(&raw)?;
-        change(&mut job);
+        change(&mut job)?;
         job.updated_at = now();
         tx.execute(
             "UPDATE jobs SET body=? WHERE id=?",
@@ -196,6 +227,88 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(job)
+    }
+
+    pub fn set_schedule(&self, id: &str, stop_at: Option<&str>) -> Result<RecordingJob> {
+        let stop_at = normalize_stop_at(stop_at)?;
+        self.update_job_checked(id, |job| {
+            if job.state.terminal() || job.stop_requested || job.state == JobState::Finalizing {
+                bail!("종료 중이거나 끝난 작업의 예약은 변경할 수 없습니다.");
+            }
+            job.stop_at = stop_at;
+            Ok(())
+        })
+    }
+
+    pub fn persist_job_manifest(&self, id: &str) -> Result<()> {
+        // Keep metadata publication ordered with bookmark/progress transactions.
+        let conn = self.lock()?;
+        let raw: String = conn.query_row("SELECT body FROM jobs WHERE id=?", [id], |r| r.get(0))?;
+        let job: RecordingJob = serde_json::from_str(&raw)?;
+        if job.state.terminal() && job.output_dir.is_dir() {
+            atomic_write(
+                &job.output_dir.join("recording.json"),
+                &serde_json::to_vec_pretty(&job)?,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn add_bookmark(&self, id: &str, req: &BookmarkRequest) -> Result<RecordingJob> {
+        req.validate()?;
+        self.update_job_checked(id, |job| {
+            let received_at = job
+                .attempts
+                .iter()
+                .find(|a| a.n == job.attempt)
+                .and_then(|a| a.last_media_at.clone())
+                .context("현재 녹화 시도에서 수신된 미디어가 없습니다.")?;
+            if job.state != JobState::Recording || job.stop_requested {
+                bail!("녹화 중인 작업에만 북마크를 추가할 수 있습니다.");
+            }
+            if job.bookmarks.len() >= 1000 {
+                bail!("작업당 북마크는 1000개까지 저장할 수 있습니다.");
+            }
+            job.bookmarks.push(Bookmark {
+                id: uuid::Uuid::new_v4().to_string(),
+                title: req.title.trim().into(),
+                note: req.note.clone(),
+                created_at: now(),
+                attempt: job.attempt,
+                received_at,
+                media_seconds: if job.live_from_start && job.attempt == 1 {
+                    None
+                } else {
+                    Some(job.media_seconds)
+                },
+            });
+            Ok(())
+        })
+    }
+
+    pub fn edit_bookmark(
+        &self,
+        id: &str,
+        bookmark_id: &str,
+        req: Option<&BookmarkRequest>,
+    ) -> Result<RecordingJob> {
+        if let Some(req) = req {
+            req.validate()?;
+        }
+        self.update_job_checked(id, |job| {
+            let index = job
+                .bookmarks
+                .iter()
+                .position(|b| b.id == bookmark_id)
+                .context("북마크를 찾을 수 없습니다.")?;
+            if let Some(req) = req {
+                job.bookmarks[index].title = req.title.trim().into();
+                job.bookmarks[index].note = req.note.clone();
+            } else {
+                job.bookmarks.remove(index);
+            }
+            Ok(())
+        })
     }
 
     pub fn enqueue_replica(&self, id: &str, target: &str) -> Result<()> {
@@ -249,11 +362,14 @@ impl Store {
             .collect()
     }
     pub fn add_channel(&self, req: &AddChannelRequest) -> Result<Channel> {
+        req.recording_options.validate()?;
         let url = channel_url(&req.url)?;
         if let Some(channel) = self.channels()?.into_iter().find(|c| c.url == url) {
             return Ok(channel);
         }
         let channel = Channel {
+            recording_options: req.recording_options.clone(),
+            live_from_start: req.live_from_start,
             id: uuid::Uuid::new_v4().to_string(),
             name: if req.name.trim().is_empty() {
                 url.clone()
@@ -273,6 +389,7 @@ impl Store {
         Ok(channel)
     }
     pub fn save_channel(&self, channel: &Channel) -> Result<()> {
+        channel.recording_options.validate()?;
         let count = self.lock()?.execute(
             "UPDATE channels SET body=? WHERE id=?",
             params![serde_json::to_string(channel)?, channel.id],
@@ -306,7 +423,9 @@ impl Store {
             }
             if job.state.active() {
                 self.update_job(&job.id, |j| {
-                    j.state = if j.stop_requested {
+                    j.state = if j.stop_requested && j.attempt > 0 {
+                        JobState::Finalizing
+                    } else if j.stop_requested {
                         JobState::Stopped
                     } else {
                         JobState::Queued
@@ -326,11 +445,153 @@ impl Store {
 mod tests {
     use super::*;
     #[test]
+    fn schedules_and_bookmarks_are_atomic_and_survive_reopening() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
+        let store = Store::open(&paths.database(), &paths.default_settings()).unwrap();
+        let req: RecordRequest = serde_json::from_value(serde_json::json!({"url":"https://youtu.be/abcdefghijk","stop_at":"2030-01-01T09:00:00+09:00"})).unwrap();
+        let job = store.add_job(&req, None, false).unwrap();
+        assert_eq!(job.stop_at.as_deref(), Some("2030-01-01T00:00:00+00:00"));
+        assert!(store.set_schedule(&job.id, Some("tomorrow")).is_err());
+        assert_eq!(store.job(&job.id).unwrap().stop_at, job.stop_at);
+        let bookmark = BookmarkRequest {
+            title: " Chorus ".into(),
+            note: "Keep this part".into(),
+        };
+        assert!(store.add_bookmark(&job.id, &bookmark).is_err());
+        store
+            .update_job(&job.id, |j| {
+                j.state = JobState::Recording;
+                j.attempt = 2;
+                j.live_from_start = true;
+                note_attempt_start(j, 2, &now());
+                note_media_received(j, 2, &now());
+                j.media_seconds = 42.5;
+            })
+            .unwrap();
+        let job = store.add_bookmark(&job.id, &bookmark).unwrap();
+        assert_eq!(job.bookmarks[0].attempt, 2);
+        assert_eq!(job.bookmarks[0].media_seconds, Some(42.5));
+        assert_eq!(job.bookmarks[0].title, "Chorus");
+        let anchor = job.bookmarks[0].created_at.clone();
+        let bookmark_id = job.bookmarks[0].id.clone();
+        drop(store);
+        let store = Store::open(&paths.database(), &paths.default_settings()).unwrap();
+        assert_eq!(store.job(&job.id).unwrap().bookmarks.len(), 1);
+        let edited = store
+            .edit_bookmark(
+                &job.id,
+                &bookmark_id,
+                Some(&BookmarkRequest {
+                    title: "Edited".into(),
+                    note: "note".into(),
+                }),
+            )
+            .unwrap();
+        assert_eq!(edited.bookmarks[0].created_at, anchor);
+        assert_eq!(edited.bookmarks[0].media_seconds, Some(42.5));
+        let long = BookmarkRequest {
+            title: "x".repeat(121),
+            note: String::new(),
+        };
+        assert!(
+            store
+                .edit_bookmark(&job.id, &bookmark_id, Some(&long))
+                .is_err()
+        );
+        assert_eq!(store.job(&job.id).unwrap().bookmarks[0].title, "Edited");
+        assert!(store.set_schedule(&job.id, None).unwrap().stop_at.is_none());
+        store
+            .update_job(&job.id, |j| j.state = JobState::Stopped)
+            .unwrap();
+        assert!(
+            store
+                .set_schedule(&job.id, Some("2030-01-01T00:00:00Z"))
+                .is_err()
+        );
+        assert!(
+            store
+                .edit_bookmark(&job.id, &bookmark_id, None)
+                .unwrap()
+                .bookmarks
+                .is_empty()
+        );
+        store
+            .update_job(&job.id, |j| {
+                j.state = JobState::Finalizing;
+                j.stop_requested = true;
+                j.stop_at = Some("2020-01-01T00:00:00Z".into());
+            })
+            .unwrap();
+        store.recover_interrupted().unwrap();
+        let pending = store.job(&job.id).unwrap();
+        assert_eq!(
+            pending.state,
+            JobState::Finalizing,
+            "interrupted timed finalization must resume without recording"
+        );
+        assert!(pending.stop_requested);
+    }
+    #[test]
+    fn recording_options_persist_across_restart_and_old_records_default() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
+        let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
+        let channel = db
+            .add_channel(&AddChannelRequest {
+                url: "https://youtube.com/@test".into(),
+                name: "Audio".into(),
+                priority: 0,
+                recording_options: RecordingOptions {
+                    audio_only: true,
+                    max_height: None,
+                },
+                live_from_start: Some(true),
+            })
+            .unwrap();
+        let job = db
+            .add_job(
+                &RecordRequest {
+                    stop_at: None,
+                    url: "https://youtu.be/abcdefghijk".into(),
+                    live_from_start: channel.live_from_start,
+                    priority: channel.priority,
+                    recording_options: channel.recording_options.clone(),
+                },
+                Some(channel.id.clone()),
+                true,
+            )
+            .unwrap();
+        drop(db);
+        let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
+        let saved = db.job(&job.id).unwrap();
+        assert!(saved.recording_options.audio_only && saved.live_from_start);
+        assert_eq!(
+            db.channels().unwrap()[0].recording_options,
+            channel.recording_options
+        );
+        let mut old = serde_json::to_value(saved).unwrap();
+        old.as_object_mut().unwrap().remove("recording_options");
+        for key in ["stop_at", "bookmarks", "alerts", "recovery_error"] {
+            old.as_object_mut().unwrap().remove(key);
+        }
+        let legacy: RecordingJob = serde_json::from_value(old).unwrap();
+        assert_eq!(legacy.recording_options, RecordingOptions::default());
+        let invalid: RecordRequest = serde_json::from_value(serde_json::json!({
+            "url": "https://youtu.be/lmnopqrstuv", "recording_options": {"max_height": 999}
+        }))
+        .unwrap();
+        assert!(db.add_job(&invalid, None, false).is_err());
+        assert_eq!(db.jobs().unwrap().len(), 1);
+    }
+    #[test]
     fn interrupted_jobs_preserve_data_and_stop_intent() {
         let d = tempfile::tempdir().unwrap();
         let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
         let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
         let req = RecordRequest {
+            stop_at: None,
+            recording_options: RecordingOptions::default(),
             url: "https://youtu.be/abcdefghijk".into(),
             live_from_start: None,
             priority: 0,
@@ -365,6 +626,8 @@ mod tests {
         let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
         let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
         let req = RecordRequest {
+            stop_at: None,
+            recording_options: RecordingOptions::default(),
             url: "https://youtu.be/abcdefghijk".into(),
             live_from_start: None,
             priority: 0,

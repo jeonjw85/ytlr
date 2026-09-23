@@ -17,11 +17,64 @@ pub async fn schedule(state: Arc<Service>) {
             _ = state.shutdown.cancelled() => break,
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {},
             _ = tick.tick() => {
-                if state.installing.load(Ordering::SeqCst) { continue; }
                 let Ok(settings) = state.store.settings() else { continue; };
                 let Ok(mut jobs) = state.store.jobs() else { continue; };
                 jobs.sort_by(|a,b| b.priority.cmp(&a.priority).then_with(|| a.created_at.cmp(&b.created_at)));
                 for job in jobs {
+                    if job.state == JobState::Finalizing && job.stop_requested {
+                        let mut active = state.active.lock().await;
+                        let Ok(job) = state.store.job(&job.id) else { continue; };
+                        if job.state != JobState::Finalizing || !job.stop_requested || active.contains_key(&job.id) { continue; }
+                        active.insert(job.id.clone(), state.shutdown.child_token());
+                        let s = state.clone();
+                        tasks.spawn(async move {
+                            if let Err(e) = finish(&s, &job.id, false).await {
+                                let message = redact(&e.to_string());
+                                let _ = s.store.update_job(&job.id, |j| {
+                                    j.state = JobState::Partial;
+                                    j.recovery_error = Some(message.clone());
+                                    j.message = format!("복구 실패 · 원본 보존: {message}");
+                                });
+                            }
+                            s.active.lock().await.remove(&job.id);
+                        });
+                        continue;
+                    }
+                    if !job.state.terminal() && job.stop_at.as_deref()
+                        .and_then(parse_rfc3339).is_some_and(|at| at <= chrono::Utc::now()) {
+                        let mut active = state.active.lock().await;
+                        let Ok(job) = state.store.job(&job.id) else { continue; };
+                        if job.state.terminal() || (job.stop_requested && active.contains_key(&job.id)) || !job.stop_at.as_deref()
+                            .and_then(parse_rfc3339).is_some_and(|at| at <= chrono::Utc::now()) { continue; }
+                        let running = active.contains_key(&job.id);
+                        if running && job.state == JobState::Finalizing { continue; }
+                        if state.store.update_job(&job.id, |j| {
+                            j.stop_requested = true;
+                            j.message = "예약된 종료 시각 도달 · 파일 정리 중".into();
+                            if !running { j.state = if j.attempt == 0 { JobState::Stopped } else { JobState::Finalizing }; }
+                        }).is_err() { continue; }
+                        if !job.stop_requested {
+                            let _ = state.store.event(&job.id, "scheduled_stop", "예약된 종료 시각에 녹화를 중지합니다.");
+                        }
+                        if let Some(cancel) = active.get(&job.id) {
+                            cancel.cancel();
+                        } else if job.attempt > 0 {
+                            active.insert(job.id.clone(), state.shutdown.child_token());
+                            let s = state.clone();
+                            tasks.spawn(async move {
+                                if let Err(e) = finish(&s, &job.id, false).await {
+                                    let _ = s.store.update_job(&job.id, |j| {
+                                        j.state = JobState::Partial;
+                                        j.recovery_error = Some(redact(&e.to_string()));
+                                        j.message = format!("복구 실패 · 원본 보존: {}", redact(&e.to_string()));
+                                    });
+                                }
+                                s.active.lock().await.remove(&job.id);
+                            });
+                        }
+                        continue;
+                    }
+                    if state.installing.load(Ordering::SeqCst) { continue; }
                     if !matches!(job.state, JobState::Queued | JobState::Waiting | JobState::Reconnecting) || job.stop_requested { continue; }
                     if state.next_checks.lock().await.get(&job.id).is_some_and(|at| *at > Instant::now()) { continue; }
                     let mut active = state.active.lock().await;
@@ -31,8 +84,10 @@ pub async fn schedule(state: Arc<Service>) {
                         let _ = state.store.update_job(&job.id, |j| { j.message = "동시 녹화 상한 도달 · 대기 중 앞부분이 누락될 수 있습니다.".into(); });
                         continue;
                     }
-                    if state.tool_status.read().await.iter().any(|t| t.error.is_some()) {
-                        let errors = state.tool_status.read().await.iter().filter_map(|t| t.error.as_ref().map(|e| format!("{}: {}", t.name, e))).collect::<Vec<_>>().join("; ");
+                    // Drop the read guard before branching. A second read while a
+                    // refresh writer is queued can otherwise deadlock a fair RwLock.
+                    let errors = state.tool_status.read().await.iter().filter_map(|t| t.error.as_ref().map(|e| format!("{}: {}", t.name, e))).collect::<Vec<_>>().join("; ");
+                    if !errors.is_empty() {
                         let _ = state.store.update_job(&job.id, |j| { j.message = format!("엔진 재확인 대기 · {errors}"); });
                         continue;
                     }
@@ -47,7 +102,17 @@ pub async fn schedule(state: Arc<Service>) {
                         let result = run_job(s.clone(), job.clone(), cancel).await;
                         if let Err(e) = result {
                             let _ = s.store.event(&job.id, "error", &format!("{e:#}"));
-                            let _ = s.store.update_job(&job.id, |j| { j.state = JobState::Failed; j.message = redact(&format!("{e:#}")); });
+                            let _ = s.store.update_job(&job.id, |j| {
+                                let message = redact(&format!("{e:#}"));
+                                if j.attempt > 0 && (j.state == JobState::Finalizing || j.stop_requested) {
+                                    j.recovery_error = Some(message.clone());
+                                    j.state = JobState::Partial;
+                                    j.message = format!("복구 실패 · 원본 보존: {message}");
+                                } else {
+                                    j.state = JobState::Failed;
+                                    j.message = message;
+                                }
+                            });
                         }
                         s.active.lock().await.remove(&job.id);
                     });
@@ -77,7 +142,7 @@ async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationTok
     let (cookie_file, po_token) = auth(&state);
     let info = tokio::select! {
         _ = cancel.cancelled() => { interrupted_state(&state, &job.id)?; return Ok(()); },
-        result = inspect(&state.tools, &job.url, cookie_file.as_deref(), po_token.as_deref()) => result,
+        result = inspect(&state.tools, &job.url, &job.recording_options, cookie_file.as_deref(), po_token.as_deref()) => result,
     };
     let info = match info {
         Ok(info) => info,
@@ -90,6 +155,7 @@ async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationTok
         j.title = info.title.clone();
         j.channel = info.channel.clone();
         j.format = info.format.clone();
+        j.resolution = info.resolution.clone();
     })?;
     if info.live_status == "is_upcoming" {
         state.store.update_job(&job.id, |j| {
@@ -160,6 +226,7 @@ async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationTok
         match inspect(
             &state.tools,
             &job.url,
+            &job.recording_options,
             auth(&state).0.as_deref(),
             auth(&state).1.as_deref(),
         )
@@ -191,12 +258,21 @@ async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationTok
 fn interrupted_state(state: &Service, id: &str) -> Result<()> {
     state.store.update_job(id, |j| {
         j.state = if j.stop_requested {
-            JobState::Stopped
+            if j.attempt > 0 {
+                JobState::Finalizing
+            } else {
+                JobState::Stopped
+            }
         } else {
             JobState::Queued
         };
         j.continuity_uncertain |= j.attempt > 0;
-        j.message = "서비스 종료 · 원본 보존 · 다음 실행에서 재개".into();
+        j.message = if j.stop_requested && j.attempt > 0 {
+            "중지 요청 · 저장된 파일 정리 대기"
+        } else {
+            "서비스 종료 · 원본 보존 · 다음 실행에서 재개"
+        }
+        .into();
     })?;
     Ok(())
 }
@@ -264,13 +340,14 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
     }
     fill_gaps(state, id).await?;
     let job = state.store.job(id)?;
-    let mut outputs = discover_outputs(&state.tools, &job.output_dir).await?;
+    let mut outputs =
+        discover_outputs(&state.tools, &job.output_dir, &job.recording_options).await?;
     for n in 1..=job.attempt {
         let dir = job.output_dir.join(format!("attempt-{n:04}"));
         if !dir.exists() || outputs.iter().any(|o| o.path.starts_with(&dir)) {
             continue;
         }
-        match salvage_attempt(&state.tools, &dir).await {
+        match salvage_attempt(&state.tools, &dir, &job.recording_options).await {
             Ok(Some(output)) => {
                 outputs.push(output);
             }
@@ -329,6 +406,9 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
         && open_gaps == 0
         && !outputs.is_empty();
     let job = state.store.update_job(id, |j| {
+        if integrity_ok && !outputs.is_empty() && open_gaps == 0 {
+            j.recovery_error = None;
+        }
         j.outputs = outputs;
         j.bytes = total_bytes;
         j.media_seconds = duration;
@@ -343,7 +423,11 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
             JobState::Failed
         };
         j.message = if complete {
-            "수집 종료 · 컨테이너·영상·음성 검사 통과 (전체 디코딩 검사는 미실행)".into()
+            if j.recording_options.audio_only {
+                "수집 종료 · 컨테이너·음성 검사 통과 (전체 디코딩 검사는 미실행)".into()
+            } else {
+                "수집 종료 · 컨테이너·영상·음성 검사 통과 (전체 디코딩 검사는 미실행)".into()
+            }
         } else if stopped {
             "중지했습니다. 저장된 파일은 보관됩니다.".into()
         } else if open_gaps > 0 {
@@ -352,10 +436,7 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
             "부분 보관 · 구간 연속성을 확인할 수 없습니다. 원본을 보존합니다.".into()
         };
     })?;
-    atomic_write(
-        &job.output_dir.join("recording.json"),
-        &serde_json::to_vec_pretty(&job)?,
-    )?;
+    state.store.persist_job_manifest(id)?;
     state.store.event(id, "finished", &job.message)?;
     Ok(())
 }
@@ -383,6 +464,7 @@ async fn fill_gaps(state: &Service, id: &str) -> Result<()> {
     let info = match tokio::select! { _ = cancel.cancelled() => return Ok(()), result = inspect(
         &state.tools,
         &job.url,
+        &job.recording_options,
         cookie_file.as_deref(),
         po_token.as_deref(),
     ) => result }
@@ -406,8 +488,15 @@ async fn fill_gaps(state: &Service, id: &str) -> Result<()> {
             gap.after_attempt,
             uuid::Uuid::new_v4()
         ));
-        match ytlr_engine::recovery::recover(&state.tools, &info, &gap, &directory, cancel.clone())
-            .await
+        match ytlr_engine::recovery::recover(
+            &state.tools,
+            &info,
+            &gap,
+            &directory,
+            &job.recording_options,
+            cancel.clone(),
+        )
+        .await
         {
             Ok(evidence) => {
                 let updated = state.store.update_job(id, |j| {
@@ -424,9 +513,15 @@ async fn fill_gaps(state: &Service, id: &str) -> Result<()> {
             Err(e) => {
                 state
                     .store
+                    .update_job(id, |j| j.recovery_error = Some(redact(&e.to_string())))?;
+                state
+                    .store
                     .event(id, "gap_unverified", &format!("구간 보충 미확인: {e}"))?;
             }
         }
+    }
+    if fillable_gaps(&state.store.job(id)?).is_empty() {
+        state.store.update_job(id, |j| j.recovery_error = None)?;
     }
     Ok(())
 }
@@ -500,8 +595,10 @@ pub async fn monitor(state: Arc<Service>) {
                     channel.last_error = None;
                     for url in urls {
                         let request = RecordRequest {
+                            stop_at: None,
                             url,
-                            live_from_start: None,
+                            recording_options: channel.recording_options.clone(),
+                            live_from_start: channel.live_from_start,
                             priority: channel.priority,
                         };
                         if let Ok(job) =

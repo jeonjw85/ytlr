@@ -7,6 +7,16 @@ use ytlr_engine::{StreamSource, Tools, VideoInfo, recovery};
 #[tokio::test]
 #[ignore = "requires ffmpeg and ffprobe; run explicitly in media integration tests"]
 async fn dated_hls_recovery_verifies_actual_media_and_rejects_wrong_ranges() {
+    check_hls_recovery(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires ffmpeg and ffprobe; run explicitly in media integration tests"]
+async fn audio_only_hls_recovery_does_not_require_a_video_timeline() {
+    check_hls_recovery(true).await;
+}
+
+async fn check_hls_recovery(audio_only: bool) {
     let d = tempfile::tempdir().unwrap();
     let tools = Tools::new(AppPaths::resolve(Some(d.path().join("app"))).unwrap());
     let generated = std::process::Command::new("ffmpeg")
@@ -40,6 +50,11 @@ async fn dated_hls_recovery_verifies_actual_media_and_rejects_wrong_ranges() {
             "-hls_segment_filename",
         ])
         .arg(d.path().join("part-%03d.ts"))
+        .args(if audio_only {
+            vec!["-map", "1:a:0"]
+        } else {
+            vec!["-map", "0:v:0", "-map", "1:a:0"]
+        })
         .arg(d.path().join("original.m3u8"))
         .status()
         .unwrap();
@@ -88,11 +103,12 @@ async fn dated_hls_recovery_verifies_actual_media_and_rejects_wrong_ranges() {
         channel: "fixture".into(),
         live_status: "is_live".into(),
         format: "fixture".into(),
+        resolution: None,
         expected_tracks: 1,
         sources: vec![StreamSource {
             url: format!("http://{address}/live.m3u8"),
             headers: HashMap::new(),
-            video: true,
+            video: !audio_only,
             audio: true,
         }],
     };
@@ -109,13 +125,25 @@ async fn dated_hls_recovery_verifies_actual_media_and_rejects_wrong_ranges() {
         &info,
         &gap,
         &d.path().join("recovery"),
+        &ytlr_core::RecordingOptions {
+            audio_only,
+            max_height: None,
+        },
         CancellationToken::new(),
     )
     .await
     .unwrap();
-    assert!(result.output.has_video && result.output.has_audio);
+    assert_eq!(result.output.has_video, !audio_only);
+    assert!(result.output.has_audio);
     assert!((result.output.duration - 3.0).abs() < 0.5);
-    assert_eq!(result.video_start, "2026-01-01T00:00:03+00:00");
+    assert_eq!(
+        result.video_start.as_deref(),
+        if audio_only {
+            None
+        } else {
+            Some("2026-01-01T00:00:03+00:00")
+        }
+    );
     assert!(result.output.path.is_file());
     gap.started_at = "2025-12-31T23:59:30Z".into();
     assert!(
@@ -124,6 +152,10 @@ async fn dated_hls_recovery_verifies_actual_media_and_rejects_wrong_ranges() {
             &info,
             &gap,
             &d.path().join("wrong-time"),
+            &ytlr_core::RecordingOptions {
+                audio_only,
+                max_height: None
+            },
             CancellationToken::new()
         )
         .await

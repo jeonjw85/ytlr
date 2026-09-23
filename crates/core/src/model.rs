@@ -104,8 +104,60 @@ impl Settings {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecordingOptions {
+    #[serde(default)]
+    pub audio_only: bool,
+    #[serde(default)]
+    pub max_height: Option<u16>,
+}
+
+impl RecordingOptions {
+    pub fn validate(&self) -> Result<()> {
+        if self
+            .max_height
+            .is_some_and(|h| !matches!(h, 480 | 720 | 1080))
+        {
+            bail!("최대 화질은 480, 720, 1080 또는 최고 화질이어야 합니다.");
+        }
+        if self.audio_only && self.max_height.is_some() {
+            bail!("음성 전용 녹음에는 최대 화질을 지정할 수 없습니다.");
+        }
+        Ok(())
+    }
+
+    pub fn format_selector(&self) -> String {
+        if self.audio_only {
+            "ba".into()
+        } else if let Some(height) = self.max_height {
+            format!("bv*[height<={height}]+ba/b[height<={height}]")
+        } else {
+            "bv*+ba/b".into()
+        }
+    }
+
+    pub fn accepts(&self, media: &MediaOutput) -> bool {
+        media.has_audio
+            && if self.audio_only {
+                !media.has_video
+            } else {
+                media.has_video
+            }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingJob {
+    #[serde(default)]
+    pub stop_at: Option<String>,
+    #[serde(default)]
+    pub bookmarks: Vec<Bookmark>,
+    #[serde(default)]
+    pub alerts: Vec<JobAlert>,
+    #[serde(default)]
+    pub recovery_error: Option<String>,
+    #[serde(default)]
+    pub recording_options: RecordingOptions,
     pub id: String,
     pub url: String,
     pub video_id: String,
@@ -120,6 +172,8 @@ pub struct RecordingJob {
     pub last_media_at: Option<String>,
     pub output_dir: PathBuf,
     pub format: String,
+    #[serde(default)]
+    pub resolution: Option<String>,
     pub bytes: u64,
     pub media_seconds: f64,
     pub attempt: u32,
@@ -168,6 +222,10 @@ pub struct MediaOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
+    #[serde(default)]
+    pub recording_options: RecordingOptions,
+    #[serde(default)]
+    pub live_from_start: Option<bool>,
     pub id: String,
     pub url: String,
     pub name: String,
@@ -188,6 +246,10 @@ pub struct JobEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordRequest {
+    #[serde(default)]
+    pub stop_at: Option<String>,
+    #[serde(default)]
+    pub recording_options: RecordingOptions,
     pub url: String,
     #[serde(default)]
     pub live_from_start: Option<bool>,
@@ -197,6 +259,10 @@ pub struct RecordRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddChannelRequest {
+    #[serde(default)]
+    pub recording_options: RecordingOptions,
+    #[serde(default)]
+    pub live_from_start: Option<bool>,
     pub url: String,
     #[serde(default)]
     pub name: String,
@@ -215,6 +281,8 @@ pub struct ToolStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub storage: Vec<StorageStatus>,
     pub version: String,
     pub jobs: Vec<RecordingJob>,
     pub channels: Vec<Channel>,
@@ -224,6 +292,67 @@ pub struct Snapshot {
     pub installing_tools: bool,
     pub tool_message: Option<String>,
     pub replica_targets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageStatus {
+    pub path: PathBuf,
+    pub free_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub bytes_per_second: Option<f64>,
+    pub remaining_seconds: Option<f64>,
+    pub low_space: bool,
+}
+
+pub fn normalize_stop_at(value: Option<&str>) -> Result<Option<String>> {
+    value
+        .map(|value| {
+            let time = crate::parse_rfc3339(value).ok_or_else(|| {
+                anyhow::anyhow!("종료 시각은 시간대가 포함된 RFC3339 형식이어야 합니다.")
+            })?;
+            Ok(time.to_rfc3339())
+        })
+        .transpose()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub id: String,
+    pub title: String,
+    pub note: String,
+    pub created_at: String,
+    pub attempt: u32,
+    pub media_seconds: Option<f64>,
+    pub received_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookmarkRequest {
+    pub title: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+impl BookmarkRequest {
+    pub fn validate(&self) -> Result<()> {
+        if self.title.trim().is_empty()
+            || self.title.chars().count() > 120
+            || self.note.chars().count() > 2000
+        {
+            bail!("북마크 제목은 1~120자, 메모는 2000자 이하여야 합니다.");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobAlert {
+    pub id: String,
+    pub kind: String,
+    pub message: String,
+    pub active: bool,
+    pub opened_at: String,
+    pub resolved_at: Option<String>,
 }
 
 pub fn video_url(input: &str) -> Result<(String, String)> {
@@ -314,6 +443,35 @@ pub fn redact(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn format_limits_never_fall_back_to_unlimited_video() {
+        for height in [480, 720, 1080] {
+            let options = RecordingOptions {
+                audio_only: false,
+                max_height: Some(height),
+            };
+            options.validate().unwrap();
+            assert!(
+                options
+                    .format_selector()
+                    .split('/')
+                    .all(|choice| choice.contains(&format!("[height<={height}]")))
+            );
+        }
+        let audio = RecordingOptions {
+            audio_only: true,
+            max_height: None,
+        };
+        assert_eq!(audio.format_selector(), "ba");
+        assert!(
+            RecordingOptions {
+                audio_only: true,
+                max_height: Some(720)
+            }
+            .validate()
+            .is_err()
+        );
+    }
     use crate::{ExtractorConfig, load_po_token, validate_cookies_file, validate_po_token_file};
     #[test]
     fn canonical_video_identity_and_untrusted_urls() {

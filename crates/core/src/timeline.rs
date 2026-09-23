@@ -36,8 +36,8 @@ pub struct TimelineGap {
 pub struct RecoveryEvidence {
     pub requested_start: String,
     pub requested_end: String,
-    pub video_start: String,
-    pub video_end: String,
+    pub video_start: Option<String>,
+    pub video_end: Option<String>,
     pub audio_start: String,
     pub audio_end: String,
     pub output: crate::MediaOutput,
@@ -145,6 +145,11 @@ mod tests {
 
     fn job() -> RecordingJob {
         RecordingJob {
+            stop_at: None,
+            bookmarks: vec![],
+            alerts: vec![],
+            recovery_error: None,
+            recording_options: RecordingOptions::default(),
             id: "j".into(),
             url: "https://www.youtube.com/watch?v=abcdefghijk".into(),
             video_id: "abcdefghijk".into(),
@@ -159,6 +164,7 @@ mod tests {
             last_media_at: None,
             output_dir: "/tmp/x".into(),
             format: String::new(),
+            resolution: None,
             bytes: 0,
             media_seconds: 0.0,
             attempt: 0,

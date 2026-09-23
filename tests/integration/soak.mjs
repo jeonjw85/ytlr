@@ -156,6 +156,7 @@ async function api(path, method = "GET", body) {
     method,
     headers: {
       authorization: `Bearer ${endpoint.token}`,
+      "x-ytlr-api-version": String(endpoint.api_version),
       "content-type": "application/json",
     },
     ...(body ? { body: JSON.stringify(body) } : {}),

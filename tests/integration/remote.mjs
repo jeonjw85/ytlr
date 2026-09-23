@@ -110,6 +110,7 @@ async function api(data, path, method = "GET", body, extra = {}) {
     method,
     headers: {
       authorization: `Bearer ${ep.token}`,
+      "x-ytlr-api-version": String(ep.api_version),
       "content-type": "application/json",
       ...extra,
     },
@@ -224,6 +225,8 @@ try {
   const request = {
     url: "https://youtu.be/abcdefghijk",
     live_from_start: true,
+    recording_options: { audio_only: false, max_height: 720 },
+    stop_at: new Date(Date.now() + 3600000).toISOString(),
   };
   const initial = await api(a, "/jobs", "POST", request);
   await Promise.all(
@@ -242,6 +245,16 @@ try {
   assert.equal(target.length, 1);
   assert.equal(target[0].replica_origin, true);
   assert.equal(target[0].replica, null, "no forwarding loop");
+  assert.deepEqual(target[0].recording_options, request.recording_options);
+  assert.equal(Date.parse(target[0].stop_at), Date.parse(request.stop_at));
+  const changedStop = new Date(Date.now() + 7200000).toISOString();
+  await api(a, `/jobs/${initial.id}/schedule`, "PUT", { stop_at: changedStop });
+  await until(
+    async () =>
+      Date.parse((await api(b, "/snapshot")).jobs[0].stop_at) ===
+      Date.parse(changedStop),
+    "updated replica deadline",
+  );
   for (const data of [a, b]) {
     const snap = await api(data, "/snapshot");
     await api(data, "/settings", "PUT", {

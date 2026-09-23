@@ -112,8 +112,14 @@ async fn fetch(
         bail!("지원되지 않는 스트림 URL");
     }
     let mut request = client.get(uri.clone());
+    let source_uri = Url::parse(&source.url)?;
+    let same_origin = source_uri.scheme() == uri.scheme()
+        && source_uri.host_str() == uri.host_str()
+        && source_uri.port_or_known_default() == uri.port_or_known_default();
     for (key, value) in &source.headers {
-        if key.eq_ignore_ascii_case("cookie") || key.eq_ignore_ascii_case("authorization") {
+        if !same_origin
+            && (key.eq_ignore_ascii_case("cookie") || key.eq_ignore_ascii_case("authorization"))
+        {
             continue;
         }
         request = request.header(key, value);
@@ -146,9 +152,10 @@ pub async fn recover(
     info: &VideoInfo,
     gap: &TimelineGap,
     directory: &Path,
+    options: &ytlr_core::RecordingOptions,
     cancel: CancellationToken,
 ) -> Result<RecoveryEvidence> {
-    let work = recover_inner(tools, info, gap, directory);
+    let work = recover_inner(tools, info, gap, directory, options);
     tokio::select! {
         _ = cancel.cancelled() => bail!("구간 보충 취소 · 수집 원본 보존"),
         result = tokio::time::timeout(Duration::from_secs(180), work) => result.context("구간 보충 시간 제한 초과")?,
@@ -160,6 +167,7 @@ async fn recover_inner(
     info: &VideoInfo,
     gap: &TimelineGap,
     directory: &Path,
+    options: &ytlr_core::RecordingOptions,
 ) -> Result<RecoveryEvidence> {
     let start = parse_rfc3339(&gap.started_at)
         .context("공백 시작 시각 오류")?
@@ -212,7 +220,7 @@ async fn recover_inner(
         let expected = (segments.last().unwrap().end_ms - segments[0].start_ms) as f64 / 1000.0;
         let probe = media::probe(tools, &path).await?;
         if (probe.duration - expected).abs() > 1.0
-            || (source.video && !probe.has_video)
+            || (source.video && !options.audio_only && !probe.has_video)
             || (source.audio && !probe.has_audio)
         {
             bail!("받은 미디어의 길이/트랙이 HLS 타임라인과 일치하지 않습니다.");
@@ -229,15 +237,22 @@ async fn recover_inner(
             bail!("복구 미디어 디코딩 검사 실패");
         }
         let range = (segments[0].start_ms, segments.last().unwrap().end_ms);
-        if source.video {
+        if source.video && !options.audio_only && probe.has_video {
             video_range = Some(range);
         }
         if source.audio {
             audio_range = Some(range);
         }
-        tracks.push((path, source.video, source.audio, range));
+        tracks.push((
+            path,
+            source.video && !options.audio_only,
+            source.audio,
+            range,
+        ));
     }
-    let video = video_range.context("영상 타임라인 없음")?;
+    if !options.audio_only && video_range.is_none() {
+        bail!("영상 타임라인 없음");
+    }
     let audio = audio_range.context("음성 타임라인 없음")?;
     let dest = directory.join("candidate.mkv");
     let staging = directory.join("candidate.partial");
@@ -251,11 +266,12 @@ async fn recover_inner(
         ])
         .arg(path);
     }
-    let vi = tracks.iter().position(|t| t.1).unwrap();
+    if !options.audio_only {
+        let vi = tracks.iter().position(|t| t.1).context("영상 트랙 없음")?;
+        cmd.args(["-map", &format!("{vi}:v:0")]);
+    }
     let ai = tracks.iter().position(|t| t.2).unwrap();
     cmd.args([
-        "-map",
-        &format!("{vi}:v:0"),
         "-map",
         &format!("{ai}:a:0"),
         "-t",
@@ -272,13 +288,10 @@ async fn recover_inner(
         bail!("구간 보충 파일 생성 실패");
     }
     let mut output = media::probe(tools, &staging).await?;
-    if !output.has_video
-        || !output.has_audio
-        || (output.duration - (end - start) as f64 / 1000.0).abs() > 1.0
-    {
+    if !options.accepts(&output) || (output.duration - (end - start) as f64 / 1000.0).abs() > 1.0 {
         bail!("구간 보충 결과 검사 실패");
     }
-    if !media::segment_has_both_tracks(tools, &staging).await? {
+    if !media::segment_has_tracks(tools, &staging, options).await? {
         bail!("영상·음성 패킷이 없습니다.");
     }
     tokio::fs::OpenOptions::new()
@@ -294,7 +307,7 @@ async fn recover_inner(
     output.verification = "hls_pdt_candidate".into();
     let evidence = RecoveryEvidence {
         requested_start: gap.started_at.clone(), requested_end: requested_end.into(),
-        video_start: timestamp(video.0)?, video_end: timestamp(video.1)?,
+        video_start: video_range.map(|v| timestamp(v.0)).transpose()?, video_end: video_range.map(|v| timestamp(v.1)).transpose()?,
         audio_start: timestamp(audio.0)?, audio_end: timestamp(audio.1)?, output,
         message: "HLS 절대 시각·트랙 길이 확인. 수신 공백은 추정치이며 기존 녹화와의 접합 경계는 미검증입니다.".into(),
     };

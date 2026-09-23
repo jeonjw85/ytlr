@@ -1,8 +1,10 @@
+mod alerts;
 mod backup;
 pub mod client;
 mod http;
 mod replica;
 mod scheduler;
+mod storage;
 pub mod tunnel;
 
 use anyhow::{Context, Result};
@@ -21,6 +23,7 @@ use ytlr_core::*;
 use ytlr_engine::Tools;
 
 pub struct Service {
+    pub storage: RwLock<Vec<StorageStatus>>,
     pub store: Arc<Store>,
     pub paths: AppPaths,
     pub tools: Tools,
@@ -39,6 +42,7 @@ impl Service {
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let settings = self.store.settings()?;
         Ok(Snapshot {
+            storage: self.storage.read().await.clone(),
             version: env!("CARGO_PKG_VERSION").into(),
             jobs: self.store.jobs()?,
             channels: self.store.channels()?,
@@ -85,6 +89,24 @@ pub async fn run(paths: AppPaths) -> Result<()> {
         .context("이미 녹화 서비스가 실행 중입니다.")?;
     let store = Arc::new(Store::open(&paths.database(), &paths.default_settings())?);
     store.recover_interrupted()?;
+    // Reconcile filesystem-derived usage after a crash between destructive
+    // cleanup and its database/manifest publication.
+    for job in store.jobs()? {
+        if !job.output_dir.is_dir() {
+            continue;
+        }
+        let Ok(files) = ytlr_engine::files_under(&job.output_dir) else {
+            continue;
+        };
+        let bytes = files
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .sum();
+        if bytes != job.bytes && store.update_job(&job.id, |job| job.bytes = bytes).is_ok() {
+            let _ = store.persist_job_manifest(&job.id);
+        }
+    }
     let settings = store.settings()?;
     std::fs::create_dir_all(&settings.storage_root)?;
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
@@ -94,12 +116,14 @@ pub async fn run(paths: AppPaths) -> Result<()> {
         uuid::Uuid::new_v4().simple()
     );
     let endpoint = ServiceEndpoint {
+        api_version: SERVICE_API_VERSION,
         port: listener.local_addr()?.port(),
         token: token.clone(),
         pid: std::process::id(),
         version: env!("CARGO_PKG_VERSION").into(),
     };
     let state = Arc::new(Service {
+        storage: RwLock::new(vec![]),
         tools: Tools::new(paths.clone()),
         store,
         paths: paths.clone(),
@@ -120,6 +144,8 @@ pub async fn run(paths: AppPaths) -> Result<()> {
     let replica = tokio::spawn(replica::run(state.clone()));
     let recovery = tokio::spawn(scheduler::recover_gaps(state.clone()));
     let backup = tokio::spawn(backup::run(state.clone()));
+    let storage = tokio::spawn(storage::run(state.clone()));
+    let alerts = tokio::spawn(alerts::run(state.clone()));
     let checker = state.clone();
     let tool_checker = tokio::spawn(async move {
         loop {
@@ -158,6 +184,8 @@ pub async fn run(paths: AppPaths) -> Result<()> {
     let _ = replica.await;
     let _ = recovery.await;
     let _ = backup.await;
+    let _ = storage.await;
+    let _ = alerts.await;
     signal.abort();
     let _ = tool_checker.await;
     let _ = std::fs::remove_file(paths.endpoint_file());

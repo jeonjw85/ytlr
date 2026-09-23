@@ -44,12 +44,23 @@ import {
 import { api, connectRemote, listRemotes, openJob, saveRemote } from "./api";
 import { useI18n, type Language } from "./i18n";
 import {
+  DeadlineFields,
+  deadlineDraft,
+  resolveDeadline,
+  JobSchedule,
+  JobBookmarks,
+  JobCleanup,
+} from "./JobTools";
+import {
   bytes,
+  defaultRecordingOptions,
   duration,
   elapsed,
   isTerminal,
   stateLabels,
   type Job,
+  type Channel,
+  type RecordingOptions,
   type JobEvent,
   type Remote,
   type Settings,
@@ -77,12 +88,16 @@ export default function App() {
   const [remotes, setRemotes] = useState<Remote[]>([]);
   const [connection, setConnection] = useState("local");
   const [detail, setDetail] = useState<string | null>(null);
+  const [editingChannel, setEditingChannel] = useState<Channel | null>(null);
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [clock, setClock] = useState(Date.now());
   const previous = useRef<Map<string, string>>(new Map());
+  const warnedStorage = useRef<Set<string>>(new Set());
+  const previousAlerts = useRef<Map<string, boolean>>(new Map());
   const initialized = useRef(false);
   const fetching = useRef(false);
+  const refreshPending = useRef(false);
   const connectionEpoch = useRef(0);
 
   const notify = useCallback(
@@ -90,34 +105,88 @@ export default function App() {
     [],
   );
   const refresh = useCallback(async () => {
-    if (!isTauri() || fetching.current) return;
-    fetching.current = true;
-    const epoch = connectionEpoch.current;
-    try {
-      const next = await api<Snapshot>("/snapshot");
-      if (epoch !== connectionEpoch.current) return;
-      setSnapshot(next);
-      setConnectionError("");
-      if (initialized.current && next.settings.notifications) {
-        for (const job of next.jobs) {
-          if (
-            previous.current.get(job.id) !== job.state &&
-            ["completed", "partial", "failed"].includes(job.state)
-          ) {
-            if (await isPermissionGranted())
-              sendNotification({
-                title: `${t(stateLabels[job.state])} · YTLR`,
-                body: job.title,
-              });
+    if (!isTauri()) return;
+    if (fetching.current) {
+      refreshPending.current = true;
+      return;
+    }
+    let repeat = true;
+    while (repeat) {
+      refreshPending.current = false;
+      fetching.current = true;
+      const epoch = connectionEpoch.current;
+      try {
+        const next = await api<Snapshot>("/snapshot");
+        if (epoch !== connectionEpoch.current) return;
+        setSnapshot(next);
+        setConnectionError("");
+        const lowStorage = (next.storage ?? []).filter((disk) => disk.low_space);
+        if (next.settings.notifications) {
+          for (const disk of lowStorage) {
+            if (!warnedStorage.current.has(disk.path)) {
+              const granted = await isPermissionGranted();
+              if (epoch !== connectionEpoch.current) return;
+              if (granted) {
+                sendNotification({
+                  title: `${t("저장 공간 부족 경고")} · YTLR`,
+                  body: `${disk.path} · ${bytes(disk.free_bytes)}`,
+                });
+              }
+            }
           }
         }
+        if (epoch !== connectionEpoch.current) return;
+        warnedStorage.current = new Set(lowStorage.map((disk) => disk.path));
+        for (const job of next.jobs) {
+          for (const alert of job.alerts ?? []) {
+            const before = previousAlerts.current.get(alert.id);
+            const changed =
+              next.settings.notifications &&
+              ((alert.active && before !== true) ||
+                (!alert.active && before === true));
+            if (changed) {
+              const granted = await isPermissionGranted();
+              if (epoch !== connectionEpoch.current) return;
+              if (granted) {
+                sendNotification({
+                  title: `${t(alert.active ? "녹화 이상 알림" : "녹화 알림 해제")} · YTLR`,
+                  body: `${job.title} · ${t(alert.message)}`,
+                });
+              }
+            }
+          }
+        }
+        if (epoch !== connectionEpoch.current) return;
+        previousAlerts.current = new Map(
+          next.jobs.flatMap((j) =>
+            (j.alerts ?? []).map((a) => [a.id, a.active] as const),
+          ),
+        );
+        if (initialized.current && next.settings.notifications) {
+          for (const job of next.jobs) {
+            if (
+              previous.current.get(job.id) !== job.state &&
+              ["completed", "partial"].includes(job.state)
+            ) {
+              const granted = await isPermissionGranted();
+              if (epoch !== connectionEpoch.current) return;
+              if (granted)
+                sendNotification({
+                  title: `${t(stateLabels[job.state])} · YTLR`,
+                  body: job.title,
+                });
+            }
+          }
+        }
+        if (epoch !== connectionEpoch.current) return;
+        previous.current = new Map(next.jobs.map((j) => [j.id, j.state]));
+        initialized.current = true;
+      } catch (error) {
+        if (epoch === connectionEpoch.current) setConnectionError(String(error));
+      } finally {
+        if (epoch === connectionEpoch.current) fetching.current = false;
       }
-      previous.current = new Map(next.jobs.map((j) => [j.id, j.state]));
-      initialized.current = true;
-    } catch (error) {
-      if (epoch === connectionEpoch.current) setConnectionError(String(error));
-    } finally {
-      if (epoch === connectionEpoch.current) fetching.current = false;
+      repeat = epoch === connectionEpoch.current && refreshPending.current;
     }
   }, [t]);
 
@@ -144,9 +213,13 @@ export default function App() {
   async function switchConnection(name: string) {
     connectionEpoch.current++;
     fetching.current = false;
+    refreshPending.current = false;
     initialized.current = false;
+    warnedStorage.current.clear();
+    previousAlerts.current.clear();
     setSnapshot(null);
     setDetail(null);
+    setEditingChannel(null);
     setAdd(null);
     setConnection(name);
     setBusy(true);
@@ -219,6 +292,9 @@ export default function App() {
   );
   const selectedJob = jobs.find((j) => j.id === detail);
   const missingTools = snapshot?.tools.some((t) => t.error);
+  const storage = snapshot?.storage?.find(
+    (disk) => disk.path === snapshot.settings.storage_root,
+  );
 
   return (
     <div className="shell">
@@ -378,6 +454,43 @@ export default function App() {
             </div>
           )}
 
+          {(snapshot?.storage ?? [])
+            .filter((disk) => disk.low_space)
+            .map((disk) => (
+              <div className="notice danger" role="alert" key={disk.path}>
+                <AlertCircle size={20} />
+                <div>
+                  <strong>{t("저장 공간 부족 경고")}</strong>
+                  <p>
+                    {disk.path} · {t("남은 저장 공간")} {bytes(disk.free_bytes)}
+                  </p>
+                  <p>
+                    {t(
+                      "공간이 부족하면 녹화가 중단됩니다. 저장 공간을 확보하세요.",
+                    )}
+                  </p>
+                </div>
+              </div>
+            ))}
+          {jobs.flatMap((job) =>
+            (job.alerts ?? [])
+              .filter((alert) => alert.active)
+              .map((alert) => (
+                <div className="notice danger" role="alert" key={alert.id}>
+                  <AlertCircle size={20} />
+                  <div>
+                    <strong>{job.title}</strong>
+                    <p>{t(alert.message)}</p>
+                  </div>
+                  <button
+                    className="button small"
+                    onClick={() => setDetail(job.id)}
+                  >
+                    {t("상세")}
+                  </button>
+                </div>
+              )),
+          )}
           {page === "recordings" && (
             <>
               <div className="stats">
@@ -403,9 +516,28 @@ export default function App() {
                 <Stat
                   label={t("남은 저장 공간")}
                   value={t(bytes(snapshot?.free_bytes ?? null))}
-                  detail={t("저장 폴더가 있는 디스크")}
+                  detail={
+                    storage?.remaining_seconds != null
+                      ? t("예약 공간 도달까지 약 {time}", {
+                          time: duration(storage.remaining_seconds),
+                        })
+                      : t("저장 폴더가 있는 디스크")
+                  }
                 />
               </div>
+              {storage && (
+                <p className="tip">
+                  {t("전체 용량")} {t(bytes(storage.total_bytes))} ·{" "}
+                  {t("디스크 기록 속도")}{" "}
+                  {storage.bytes_per_second == null
+                    ? "—"
+                    : `${bytes(storage.bytes_per_second)}/s`}
+                  {" · "}
+                  {t(
+                    "남은 시간은 최근 전체 녹화 기록 속도 기준 추정치입니다. 병합·복구에는 추가 공간이 필요합니다.",
+                  )}
+                </p>
+              )}
               <div className="section-bar">
                 <h2>
                   {t("진행 중인 작업")} <span>{running.length}</span>
@@ -422,6 +554,18 @@ export default function App() {
                       onDetail={() => setDetail(job.id)}
                       onFolder={() => safeOpen(job)}
                       onStop={() => safeAction(`/jobs/${job.id}/stop`)}
+                      onBookmark={() =>
+                        safeAction(
+                          `/jobs/${job.id}/bookmarks`,
+                          "POST",
+                          {
+                            title: t("북마크 {count}", {
+                              count: (job.bookmarks?.length ?? 0) + 1,
+                            }),
+                          },
+                          "북마크를 저장했습니다.",
+                        )
+                      }
                       busy={busy}
                     />
                   ))}
@@ -507,6 +651,17 @@ export default function App() {
                           channel.enabled ? "방송 자동 감시" : "감시 일시 중지",
                         )}
                       </div>
+                      <p>
+                        <RecordingSummary options={channel.recording_options} />
+                      </p>
+                      <button
+                        className="button small"
+                        disabled={busy}
+                        onClick={() => setEditingChannel(channel)}
+                      >
+                        <Settings2 size={14} />
+                        {t("녹화 옵션")}
+                      </button>
                       {channel.last_error && (
                         <p className="inline-error">{t(channel.last_error)}</p>
                       )}
@@ -581,7 +736,8 @@ export default function App() {
                           {new Date(job.created_at).toLocaleDateString(
                             dateLocale,
                           )}{" "}
-                          · {bytes(job.bytes)}
+                          · {bytes(job.bytes)} ·{" "}
+                          <RecordingSummary options={job.recording_options} />
                         </p>
                         <span className="library-note">{t(job.message)}</span>
                       </div>
@@ -674,6 +830,25 @@ export default function App() {
           onAction={safeAction}
           onOpen={safeOpen}
           onNotify={notify}
+          onChanged={refresh}
+        />
+      )}
+      {editingChannel && (
+        <ChannelOptionsDialog
+          channel={editingChannel}
+          onClose={() => setEditingChannel(null)}
+          onSave={async (options, fromStart) => {
+            const current = snapshot?.channels.find(
+              (channel) => channel.id === editingChannel.id,
+            );
+            if (!current) throw new Error(t("채널을 찾을 수 없습니다."));
+            await action(`/channels/${current.id}`, "PUT", {
+              ...current,
+              recording_options: options,
+              live_from_start: fromStart,
+            });
+            setEditingChannel(null);
+          }}
         />
       )}
       {toast && (
@@ -778,6 +953,7 @@ function JobCard({
   onDetail,
   onFolder,
   onStop,
+  onBookmark,
   busy,
 }: {
   job: Job;
@@ -785,6 +961,7 @@ function JobCard({
   onDetail: () => void;
   onFolder: () => void;
   onStop: () => void;
+  onBookmark: () => void;
   busy: boolean;
 }) {
   const { t } = useI18n();
@@ -799,7 +976,10 @@ function JobCard({
           <h3>
             {job.title === "방송 정보 확인 대기" ? t(job.title) : job.title}
           </h3>
-          <p>{job.format || job.url}</p>
+          <p>
+            <RecordingSummary options={job.recording_options} /> ·{" "}
+            {job.resolution || job.format || job.url}
+          </p>
         </div>
         <button
           className="icon-button"
@@ -848,6 +1028,15 @@ function JobCard({
           {t(job.message)}
         </span>
         <div>
+          {job.state === "recording" && (
+            <button
+              className="button ghost small"
+              disabled={busy || job.stop_requested}
+              onClick={onBookmark}
+            >
+              {t("지금 표시")}
+            </button>
+          )}
           <button className="button ghost small" onClick={onDetail}>
             {t("상세")}
           </button>
@@ -861,6 +1050,13 @@ function JobCard({
           </button>
         </div>
       </div>
+      {job.stop_at && (
+        <p className="tip">
+          {t("예약 종료까지 {time}", {
+            time: duration((new Date(job.stop_at).getTime() - clock) / 1000),
+          })}
+        </p>
+      )}
     </article>
   );
 }
@@ -936,6 +1132,158 @@ function Modal({
   );
 }
 
+function RecordingSummary({
+  options = defaultRecordingOptions,
+}: {
+  options?: RecordingOptions;
+}) {
+  const { t } = useI18n();
+  return (
+    <>
+      {options.audio_only
+        ? t("음성만")
+        : options.max_height
+          ? t("최대 {height}p", { height: options.max_height })
+          : t("최고 화질")}
+    </>
+  );
+}
+
+function RecordingFields({
+  options,
+  onChange,
+}: {
+  options: RecordingOptions;
+  onChange: (options: RecordingOptions) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <>
+      <label className="field">
+        {t("녹화 모드")}
+        <select
+          value={options.audio_only ? "audio" : "video"}
+          onChange={(e) =>
+            onChange({
+              audio_only: e.target.value === "audio",
+              max_height: null,
+            })
+          }
+        >
+          <option value="video">{t("영상 + 음성")}</option>
+          <option value="audio">{t("음성만")}</option>
+        </select>
+      </label>
+      {!options.audio_only && (
+        <label className="field">
+          {t("최대 화질")}
+          <select
+            value={options.max_height ?? "best"}
+            onChange={(e) =>
+              onChange({
+                ...options,
+                max_height:
+                  e.target.value === "best"
+                    ? null
+                    : (Number(
+                        e.target.value,
+                      ) as RecordingOptions["max_height"]),
+              })
+            }
+          >
+            <option value="best">{t("최고 화질")}</option>
+            {[1080, 720, 480].map((height) => (
+              <option value={height} key={height}>
+                {height}p
+              </option>
+            ))}
+          </select>
+          <small>
+            {t("선택한 해상도 이하에서 가장 좋은 스트림을 저장합니다.")}
+          </small>
+        </label>
+      )}
+      {options.audio_only && (
+        <p className="muted">
+          {t("음성 전용 스트림을 원본 코덱으로 저장합니다.")}
+        </p>
+      )}
+    </>
+  );
+}
+
+function ChannelOptionsDialog({
+  channel,
+  onClose,
+  onSave,
+}: {
+  channel: Channel;
+  onClose: () => void;
+  onSave: (
+    options: RecordingOptions,
+    fromStart: boolean | null,
+  ) => Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [options, setOptions] = useState(
+    channel.recording_options ?? defaultRecordingOptions,
+  );
+  const [fromStart, setFromStart] = useState(channel.live_from_start ?? null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <Modal title={t("채널 녹화 옵션")} onClose={onClose}>
+      <form
+        onSubmit={async (event) => {
+          event.preventDefault();
+          setPending(true);
+          setError("");
+          try {
+            await onSave(options, fromStart);
+          } catch (error) {
+            setError(String(error));
+          } finally {
+            setPending(false);
+          }
+        }}
+      >
+        <p className="modal-intro">
+          {channel.name} · {t("변경 사항은 새로 생성되는 녹화에 적용됩니다.")}
+        </p>
+        <RecordingFields options={options} onChange={setOptions} />
+        <label className="field">
+          {t("녹화 시작 지점")}
+          <select
+            value={fromStart === null ? "default" : String(fromStart)}
+            onChange={(e) =>
+              setFromStart(
+                e.target.value === "default" ? null : e.target.value === "true",
+              )
+            }
+          >
+            <option value="default">{t("전체 설정 따르기")}</option>
+            <option value="false">{t("현재 시점부터")}</option>
+            <option value="true">{t("가능하면 방송 처음부터 저장")}</option>
+          </select>
+        </label>
+        {error && (
+          <p className="inline-error" role="alert">
+            {t(error)}
+          </p>
+        )}
+        <div className="modal-actions">
+          <button type="button" className="button" onClick={onClose}>
+            {t("취소")}
+          </button>
+          <button className="button primary" disabled={pending}>
+            {t("저장")}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 function AddDialog({
   kind,
   fromStart,
@@ -951,6 +1299,8 @@ function AddDialog({
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
   const [start, setStart] = useState(fromStart);
+  const [options, setOptions] = useState(defaultRecordingOptions);
+  const [deadline, setDeadline] = useState(() => deadlineDraft());
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   async function submit(e: FormEvent) {
@@ -961,8 +1311,20 @@ function AddDialog({
       await onSubmit(
         kind === "record" ? "/jobs" : "/channels",
         kind === "record"
-          ? { url, live_from_start: start, priority: 0 }
-          : { url, name, priority: 0 },
+          ? {
+              url,
+              live_from_start: start,
+              priority: 0,
+              recording_options: options,
+              stop_at: resolveDeadline(deadline),
+            }
+          : {
+              url,
+              name,
+              live_from_start: start,
+              priority: 0,
+              recording_options: options,
+            },
       );
     } catch (e) {
       setError(String(e));
@@ -997,7 +1359,11 @@ function AddDialog({
             onChange={(e) => setUrl(e.target.value)}
           />
         </label>
-        {kind === "channel" ? (
+        <RecordingFields options={options} onChange={setOptions} />
+        {kind === "record" && (
+          <DeadlineFields value={deadline} onChange={setDeadline} />
+        )}
+        {kind === "channel" && (
           <label className="field">
             {t("표시 이름")} <span className="muted">{t("선택")}</span>
             <input
@@ -1006,21 +1372,20 @@ function AddDialog({
               onChange={(e) => setName(e.target.value)}
             />
           </label>
-        ) : (
-          <label className="check-field">
-            <input
-              type="checkbox"
-              checked={start}
-              onChange={(e) => setStart(e.target.checked)}
-            />
-            <div>
-              {t("가능하면 방송 처음부터 저장")}
-              <small>
-                {t("유튜브에서 제공하는 과거 구간 범위에 따라 달라집니다.")}
-              </small>
-            </div>
-          </label>
         )}
+        <label className="check-field">
+          <input
+            type="checkbox"
+            checked={start}
+            onChange={(e) => setStart(e.target.checked)}
+          />
+          <div>
+            {t("가능하면 방송 처음부터 저장")}
+            <small>
+              {t("유튜브에서 제공하는 과거 구간 범위에 따라 달라집니다.")}
+            </small>
+          </div>
+        </label>
         {error && (
           <p className="inline-error" role="alert">
             {t(error)}
@@ -1163,6 +1528,7 @@ function Details({
   onAction,
   onOpen,
   onNotify,
+  onChanged,
 }: {
   job: Job;
   onClose: () => void;
@@ -1174,6 +1540,7 @@ function Details({
   ) => void;
   onOpen: (job: Job, index?: number) => void;
   onNotify: (message: string, error?: boolean) => void;
+  onChanged: () => Promise<void>;
 }) {
   const { t, dateLocale } = useI18n();
   const [events, setEvents] = useState<JobEvent[]>([]);
@@ -1212,6 +1579,16 @@ function Details({
         <p>{t(job.message)}</p>
       </div>
       <dl className="detail-grid">
+        <div>
+          <dt>{t("녹화 옵션")}</dt>
+          <dd>
+            <RecordingSummary options={job.recording_options} />
+          </dd>
+        </div>
+        <div>
+          <dt>{t("선택된 스트림")}</dt>
+          <dd>{job.resolution || job.format || "—"}</dd>
+        </div>
         <div>
           <dt>{t("수집 시도")}</dt>
           <dd>{t("{count}회", { count: job.attempt })}</dd>
@@ -1287,6 +1664,28 @@ function Details({
           {t(job.replica.message)}
         </p>
       )}
+      <JobSchedule key={`schedule-${job.id}`} job={job} onChanged={onChanged} />
+      <JobBookmarks
+        key={`bookmarks-${job.id}`}
+        job={job}
+        onChanged={onChanged}
+      />
+      {isTerminal(job) && (
+        <JobCleanup key={`cleanup-${job.id}`} job={job} onChanged={onChanged} />
+      )}
+      {!!job.alerts?.length && (
+        <section className="job-tool-section">
+          <h4>{t("상태 알림")}</h4>
+          {job.alerts.map((alert) => (
+            <p
+              key={alert.id}
+              className={alert.active ? "warning-text" : "muted"}
+            >
+              {t(alert.message)} · {t(alert.active ? "확인 필요" : "알림 해제")}
+            </p>
+          ))}
+        </section>
+      )}
       <h4>{t("재생 가능한 결과")}</h4>
       {job.outputs.length ? (
         job.outputs.map((output, i) => (
@@ -1295,7 +1694,12 @@ function Details({
             <div>
               <strong>{output.path.split(/[\\/]/).pop()}</strong>
               <small>
-                {bytes(output.bytes)} · {t("영상·음성 헤더 검사")}
+                {bytes(output.bytes)} ·{" "}
+                {t(
+                  job.recording_options?.audio_only
+                    ? "음성 헤더 검사"
+                    : "영상·음성 헤더 검사",
+                )}
               </small>
             </div>
             <button className="button small" onClick={() => onOpen(job, i)}>
@@ -1303,8 +1707,16 @@ function Details({
             </button>
             <button
               className="icon-button"
-              title={t("MP4 내보내기")}
-              aria-label={t("MP4 내보내기")}
+              title={t(
+                job.recording_options?.audio_only
+                  ? "음성 내보내기 (MKA)"
+                  : "MP4 내보내기",
+              )}
+              aria-label={t(
+                job.recording_options?.audio_only
+                  ? "음성 내보내기 (MKA)"
+                  : "MP4 내보내기",
+              )}
               onClick={() =>
                 onAction(
                   `/jobs/${job.id}/export`,

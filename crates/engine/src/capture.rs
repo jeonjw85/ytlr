@@ -19,7 +19,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use ytlr_core::{
-    JobState, RecordingJob, Settings, Store, atomic_write, note_media_received, now, private_dir,
+    JobState, RecordingJob, RecordingOptions, Settings, Store, atomic_write, note_media_received,
+    now, private_dir,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +30,7 @@ pub struct VideoInfo {
     pub channel: String,
     pub live_status: String,
     pub format: String,
+    pub resolution: Option<String>,
     pub expected_tracks: usize,
     pub sources: Vec<StreamSource>,
 }
@@ -93,12 +95,15 @@ pub struct CommandArgs {
 pub async fn inspect(
     tools: &Tools,
     url: &str,
+    options: &RecordingOptions,
     cookies: Option<&Path>,
     po_token: Option<&Path>,
 ) -> Result<VideoInfo> {
+    options.validate()?;
     let mut cmd = Command::new(tools.require("yt-dlp")?);
     let arguments = base_args(tools, cookies, po_token)?;
     cmd.args(&arguments.args)
+        .args(["--format", &options.format_selector()])
         .args([
             "--no-playlist",
             "--skip-download",
@@ -121,6 +126,7 @@ pub async fn inspect(
                 channel: String::new(),
                 live_status: "is_upcoming".into(),
                 format: String::new(),
+                resolution: None,
                 expected_tracks: 0,
                 sources: vec![],
             });
@@ -157,6 +163,11 @@ pub async fn inspect(
         channel: v["channel"].as_str().unwrap_or_default().into(),
         live_status: v["live_status"].as_str().unwrap_or("not_live").into(),
         format: v["format"].as_str().unwrap_or_default().into(),
+        resolution: v["resolution"].as_str().map(String::from).or_else(|| {
+            formats
+                .iter()
+                .find_map(|f| f["height"].as_u64().map(|h| format!("{h}p")))
+        }),
         expected_tracks: v["requested_formats"].as_array().map_or(1, Vec::len),
         sources,
     })
@@ -216,10 +227,12 @@ pub fn capture_args(
         "--keep-fragments", "--keep-video", "--no-overwrites", "--no-post-overwrites",
         "--fragment-retries", "5", "--retry-sleep", "fragment:exp=1:10", "--concurrent-fragments", "2",
         "--skip-unavailable-fragments", "--merge-output-format", "mkv", "--remux-video", "mkv",
-        "--format", "bv*+ba/b", "--fixup", "never",
+        "--fixup", "never",
         "--progress-template", "download:__YTLR_PROGRESS__{\"bytes\":%(progress.downloaded_bytes)j,\"track\":%(info.format_id)j,\"status\":%(progress.status)j}",
         "--print", "before_dl:__YTLR_INFO__%(.{id,title,channel,format,resolution,format_id})j",
     ].into_iter().map(String::from));
+    job.recording_options.validate()?;
+    args.extend(["--format".into(), job.recording_options.format_selector()]);
     // New attempts have distinct filenames. Unknown boundaries are never appended blindly.
     args.push(
         if job.live_from_start && job.attempt == 1 {
@@ -268,7 +281,11 @@ impl ProgressTracker {
     }
 }
 
-pub fn ffmpeg_capture_args(info: &VideoInfo, attempt: &Path) -> Result<Vec<String>> {
+pub fn ffmpeg_capture_args(
+    info: &VideoInfo,
+    attempt: &Path,
+    options: &RecordingOptions,
+) -> Result<Vec<String>> {
     if info.sources.is_empty() {
         bail!("접근 가능한 스트림 URL이 없습니다.");
     }
@@ -300,22 +317,20 @@ pub fn ffmpeg_capture_args(info: &VideoInfo, attempt: &Path) -> Result<Vec<Strin
         }
         args.extend(["-i".into(), source.url.clone()]);
     }
-    let video = info
-        .sources
-        .iter()
-        .position(|s| s.video)
-        .context("영상 트랙을 찾을 수 없습니다.")?;
+    if !options.audio_only {
+        let video = info
+            .sources
+            .iter()
+            .position(|s| s.video)
+            .context("영상 트랙을 찾을 수 없습니다.")?;
+        args.extend(["-map".into(), format!("{video}:v:0")]);
+    }
     let audio = info
         .sources
         .iter()
         .position(|s| s.audio)
         .context("음성 트랙을 찾을 수 없습니다.")?;
-    args.extend([
-        "-map".into(),
-        format!("{video}:v:0"),
-        "-map".into(),
-        format!("{audio}:a:0"),
-    ]);
+    args.extend(["-map".into(), format!("{audio}:a:0")]);
     args.extend(
         [
             "-c",
@@ -357,7 +372,7 @@ pub async fn capture(
     atomic_write(
         &attempt.join("session.json"),
         &serde_json::to_vec_pretty(
-            &serde_json::json!({"video_id":job.video_id,"attempt":job.attempt,"started_at":now(),"from_start":job.live_from_start && job.attempt == 1}),
+            &serde_json::json!({"video_id":job.video_id,"attempt":job.attempt,"started_at":now(),"from_start":job.live_from_start && job.attempt == 1,"recording_options":job.recording_options}),
         )?,
     )?;
     let started_at = now();
@@ -372,7 +387,7 @@ pub async fn capture(
     let spec = if ffmpeg_mode {
         WorkerSpec {
             executable: tools.require("ffmpeg")?,
-            args: ffmpeg_capture_args(&info, &attempt)?,
+            args: ffmpeg_capture_args(&info, &attempt, &job.recording_options)?,
             cwd: attempt.clone(),
         }
     } else {
@@ -460,6 +475,7 @@ pub async fn capture(
                             if let Some(title) = value["title"].as_str() { j.title = title.into(); }
                             if let Some(channel) = value["channel"].as_str() { j.channel = channel.into(); }
                             j.format = value["format"].as_str().unwrap_or("최고 화질").into();
+                            j.resolution = value["resolution"].as_str().map(String::from);
                         })?;
                     }
                 } else {
@@ -495,7 +511,7 @@ pub async fn capture(
                 if ffmpeg_mode && !interrupted {
                     for segment in crate::closed_segments(&attempt)? {
                         if checked_segments.contains(&segment) { continue; }
-                        if !crate::segment_has_both_tracks(&tools, &segment).await? {
+                        if !crate::segment_has_tracks(&tools, &segment, &job.recording_options).await? {
                             store.update_job(&job.id, |j| j.continuity_uncertain = true)?;
                             reason = "분할 파일에서 영상 또는 음성 패킷 누락 감지".into();
                             store.event(&job.id, "gap", &reason)?;
@@ -555,6 +571,39 @@ fn fs2_free(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn audio_capture_requires_audio_but_not_video() {
+        let options = RecordingOptions {
+            audio_only: true,
+            max_height: None,
+        };
+        let info = VideoInfo {
+            id: "test".into(),
+            title: "test".into(),
+            channel: "test".into(),
+            live_status: "is_live".into(),
+            format: "audio".into(),
+            resolution: None,
+            expected_tracks: 1,
+            sources: vec![StreamSource {
+                url: "http://localhost/audio".into(),
+                headers: HashMap::new(),
+                video: false,
+                audio: true,
+            }],
+        };
+        let args = ffmpeg_capture_args(&info, Path::new("/tmp/capture"), &options).unwrap();
+        assert!(args.iter().any(|a| a == "0:a:0"));
+        assert!(!args.iter().any(|a| a == "0:v:0"));
+        assert!(
+            ffmpeg_capture_args(
+                &info,
+                Path::new("/tmp/capture"),
+                &RecordingOptions::default()
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn one_track_cannot_hide_another_tracks_stall() {
         let start = Instant::now();

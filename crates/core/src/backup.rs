@@ -214,6 +214,22 @@ pub fn mirror_committed(src_root: &Path, dest_root: &Path) -> Result<usize> {
             count += 1;
         }
     }
+    for entry in fs::read_dir(src_root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("ledger-before-cleanup-")
+            && name.ends_with(".jsonl")
+            && entry.file_type()?.is_file()
+        {
+            copy_verified(
+                &entry.path(),
+                &dest_root.join(name.as_ref()),
+                &file_digest(&entry.path())?,
+            )?;
+            count += 1;
+        }
+    }
     Ok(count)
 }
 
@@ -293,6 +309,23 @@ pub fn mirror_job(spec: &BackupSpec) -> Result<usize> {
         };
         copy_verified(&output.path, &dest, &expected)?;
         count += 1;
+    }
+    for entry in fs::read_dir(src_root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("cleanup-")
+            && name.ends_with(".json")
+            && name != "cleanup-plan.json"
+            && entry.file_type()?.is_file()
+        {
+            copy_verified(
+                &entry.path(),
+                &dest_root.join(name.as_ref()),
+                &file_digest(&entry.path())?,
+            )?;
+            count += 1;
+        }
     }
     if backup_device(&spec.root)? != actual {
         bail!("백업 중 디스크가 변경되었습니다.");

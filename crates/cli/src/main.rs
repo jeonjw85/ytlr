@@ -19,19 +19,81 @@ struct Args {
     #[command(subcommand)]
     command: Action,
 }
+
+#[derive(clap::Args)]
+struct DeadlineArgs {
+    /// Absolute stop time, including timezone (RFC3339).
+    #[arg(long, conflicts_with = "for_minutes")]
+    stop_at: Option<String>,
+    /// Stop this many minutes from now (including waiting time).
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=525600))]
+    for_minutes: Option<u64>,
+}
+
+impl DeadlineArgs {
+    fn resolve(&self) -> Result<Option<String>> {
+        if let Some(minutes) = self.for_minutes {
+            // Keep the CLI independent of a clock/time dependency: the service accepts RFC3339.
+            let at = parse_rfc3339(&now()).context("현재 시각 오류")?
+                + std::time::Duration::from_secs(minutes * 60);
+            Ok(Some(at.to_rfc3339()))
+        } else {
+            normalize_stop_at(self.stop_at.as_deref())
+        }
+    }
+}
+
+#[derive(clap::Args)]
+struct CaptureOptions {
+    /// Download only the best available audio stream.
+    #[arg(long, conflicts_with = "max_height")]
+    audio_only: bool,
+    /// Maximum video height: 480, 720, or 1080. Omit for best quality.
+    #[arg(long, value_parser = ["480", "720", "1080"])]
+    max_height: Option<String>,
+    #[arg(long, conflicts_with = "from_start")]
+    from_now: bool,
+    #[arg(long)]
+    from_start: bool,
+}
+
+impl CaptureOptions {
+    fn recording_options(&self) -> RecordingOptions {
+        RecordingOptions {
+            audio_only: self.audio_only,
+            max_height: self
+                .max_height
+                .as_ref()
+                .map(|h| h.parse().expect("validated height")),
+        }
+    }
+    fn live_from_start(&self) -> Option<bool> {
+        if self.from_now {
+            Some(false)
+        } else if self.from_start {
+            Some(true)
+        } else {
+            None
+        }
+    }
+}
 #[derive(Subcommand)]
 enum Action {
     /// 라이브 URL 녹화 또는 예약 방송 대기
     Record {
         url: String,
-        #[arg(long)]
-        from_now: bool,
+        #[command(flatten)]
+        deadline: DeadlineArgs,
+        #[command(flatten)]
+        capture: CaptureOptions,
         #[arg(long, default_value_t = 0)]
         priority: i32,
     },
     /// 채널을 추가하고 자동 감시
     Watch {
         url: String,
+        #[command(flatten)]
+        capture: CaptureOptions,
     },
     /// 녹화 현황
     Status {
@@ -54,6 +116,32 @@ enum Action {
     },
     Events {
         id: String,
+    },
+    /// Change or cancel the stop deadline of an unfinished job.
+    Schedule {
+        id: String,
+        #[command(flatten)]
+        deadline: DeadlineArgs,
+        #[arg(long, conflicts_with_all = ["stop_at", "for_minutes"])]
+        clear: bool,
+    },
+    Bookmark {
+        #[command(subcommand)]
+        action: BookmarkAction,
+    },
+    /// Inspect file categories and sizes for a job.
+    Storage {
+        id: String,
+    },
+    /// Preview cleanup, or execute a preview using --plan ID --all / --file PATH.
+    Cleanup {
+        id: String,
+        #[arg(long)]
+        plan: Option<String>,
+        #[arg(long, requires = "plan", conflicts_with = "file")]
+        all: bool,
+        #[arg(long, requires = "plan")]
+        file: Vec<String>,
     },
     Channel {
         #[command(subcommand)]
@@ -109,6 +197,14 @@ enum ChannelAction {
         url: String,
         #[arg(long, default_value = "")]
         name: String,
+        #[command(flatten)]
+        capture: CaptureOptions,
+    },
+    /// Replace a channel's defaults for future recordings.
+    Configure {
+        id: String,
+        #[command(flatten)]
+        capture: CaptureOptions,
     },
     List,
     Remove {
@@ -119,6 +215,30 @@ enum ChannelAction {
     },
     Disable {
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BookmarkAction {
+    Add {
+        id: String,
+        title: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    List {
+        id: String,
+    },
+    Edit {
+        id: String,
+        bookmark_id: String,
+        title: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    Remove {
+        id: String,
+        bookmark_id: String,
     },
 }
 #[derive(Subcommand)]
@@ -316,25 +436,30 @@ async fn execute() -> Result<()> {
         Action::Start => println!("녹화 서비스 실행 중"),
         Action::Record {
             url,
-            from_now,
+            deadline,
+            capture,
             priority,
         } => print_json(
             &client
                 .post::<RecordingJob>(
                     "/jobs",
                     &RecordRequest {
+                        stop_at: deadline.resolve()?,
                         url,
-                        live_from_start: if from_now { Some(false) } else { None },
+                        recording_options: capture.recording_options(),
+                        live_from_start: capture.live_from_start(),
                         priority,
                     },
                 )
                 .await?,
         )?,
-        Action::Watch { url } => print_json(
+        Action::Watch { url, capture } => print_json(
             &client
                 .post::<Channel>(
                     "/channels",
                     &AddChannelRequest {
+                        recording_options: capture.recording_options(),
+                        live_from_start: capture.live_from_start(),
                         url,
                         name: String::new(),
                         priority: 0,
@@ -357,6 +482,28 @@ async fn execute() -> Result<()> {
                     println!(
                         "{}  {:?}  {}\n  {}",
                         job.id, job.state, job.title, job.message
+                    );
+                    println!(
+                        "  {} · {}",
+                        job.recording_options.format_selector(),
+                        job.resolution.as_deref().unwrap_or(&job.format)
+                    );
+                }
+                for disk in data.storage {
+                    println!(
+                        "{} · free {} · estimated seconds {}{}",
+                        disk.path.display(),
+                        disk.free_bytes
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "unknown".into()),
+                        disk.remaining_seconds
+                            .map(|s| format!("{s:.0}"))
+                            .unwrap_or_else(|| "unknown".into()),
+                        if disk.low_space {
+                            " · LOW STORAGE"
+                        } else {
+                            ""
+                        }
                     );
                 }
             }
@@ -384,12 +531,105 @@ async fn execute() -> Result<()> {
         Action::Events { id } => {
             print_json(&client.get::<Value>(&format!("/jobs/{id}/events")).await?)?
         }
+        Action::Schedule {
+            id,
+            deadline,
+            clear,
+        } => {
+            let stop_at = deadline.resolve()?;
+            if stop_at.is_none() && !clear {
+                bail!("--stop-at, --for-minutes 또는 --clear를 지정하세요.");
+            }
+            print_json(
+                &client
+                    .request::<RecordingJob>(
+                        reqwest::Method::PUT,
+                        &format!("/jobs/{id}/schedule"),
+                        Some(&json!({"stop_at":stop_at})),
+                    )
+                    .await?,
+            )?;
+        }
+        Action::Bookmark { action } => match action {
+            BookmarkAction::List { id } => {
+                let job = client
+                    .get::<Snapshot>("/snapshot")
+                    .await?
+                    .jobs
+                    .into_iter()
+                    .find(|j| j.id == id)
+                    .context("녹화 작업을 찾을 수 없습니다.")?;
+                print_json(&job.bookmarks)?;
+            }
+            BookmarkAction::Add { id, title, note } => print_json(
+                &client
+                    .post::<RecordingJob>(
+                        &format!("/jobs/{id}/bookmarks"),
+                        &BookmarkRequest { title, note },
+                    )
+                    .await?,
+            )?,
+            BookmarkAction::Edit {
+                id,
+                bookmark_id,
+                title,
+                note,
+            } => print_json(
+                &client
+                    .request::<RecordingJob>(
+                        reqwest::Method::PUT,
+                        &format!("/jobs/{id}/bookmarks/{bookmark_id}"),
+                        Some(&BookmarkRequest { title, note }),
+                    )
+                    .await?,
+            )?,
+            BookmarkAction::Remove { id, bookmark_id } => print_json(
+                &client
+                    .request::<RecordingJob>(
+                        reqwest::Method::DELETE,
+                        &format!("/jobs/{id}/bookmarks/{bookmark_id}"),
+                        None::<&Value>,
+                    )
+                    .await?,
+            )?,
+        },
+        Action::Storage { id } => {
+            print_json(&client.get::<Value>(&format!("/jobs/{id}/storage")).await?)?
+        }
+        Action::Cleanup {
+            id,
+            plan,
+            all,
+            file,
+        } => {
+            if let Some(plan_id) = plan {
+                if !all && file.is_empty() {
+                    bail!("삭제할 --file 또는 --all을 명시하세요.");
+                }
+                print_json(
+                    &client
+                        .post::<Value>(
+                            &format!("/jobs/{id}/cleanup"),
+                            &json!({"plan_id":plan_id,"all":all,"files":file}),
+                        )
+                        .await?,
+                )?;
+            } else {
+                print_json(
+                    &client
+                        .post::<Value>(&format!("/jobs/{id}/cleanup/preview"), &json!({}))
+                        .await?,
+                )?;
+            }
+        }
         Action::Channel { action } => match action {
-            ChannelAction::Add { url, name } => print_json(
+            ChannelAction::Add { url, name, capture } => print_json(
                 &client
                     .post::<Channel>(
                         "/channels",
                         &AddChannelRequest {
+                            recording_options: capture.recording_options(),
+                            live_from_start: capture.live_from_start(),
                             url,
                             name,
                             priority: 0,
@@ -399,6 +639,26 @@ async fn execute() -> Result<()> {
             )?,
             ChannelAction::List => {
                 print_json(&client.get::<Snapshot>("/snapshot").await?.channels)?
+            }
+            ChannelAction::Configure { id, capture } => {
+                let mut channel = client
+                    .get::<Snapshot>("/snapshot")
+                    .await?
+                    .channels
+                    .into_iter()
+                    .find(|c| c.id == id)
+                    .context("채널을 찾을 수 없습니다.")?;
+                channel.recording_options = capture.recording_options();
+                channel.live_from_start = capture.live_from_start();
+                print_json(
+                    &client
+                        .request::<Channel>(
+                            reqwest::Method::PUT,
+                            &format!("/channels/{id}"),
+                            Some(&channel),
+                        )
+                        .await?,
+                )?;
             }
             ChannelAction::Remove { id } => print_json(
                 &client

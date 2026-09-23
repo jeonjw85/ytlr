@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import { describe, expect, it } from "vitest";
 import appSource from "./App.tsx?raw";
+import jobToolsSource from "./JobTools.tsx?raw";
 import ts from "typescript";
 import { translate } from "./i18n";
 import { english } from "./locales/en";
@@ -43,6 +44,15 @@ describe("UI translations", () => {
       ts.forEachChild(node, visit);
     };
     visit(source);
+    visit(
+      ts.createSourceFile(
+        "JobTools.tsx",
+        jobToolsSource,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TSX,
+      ),
+    );
     for (const label of Object.values(stateLabels)) {
       if (!Object.hasOwn(english, label)) missing.push(label);
     }

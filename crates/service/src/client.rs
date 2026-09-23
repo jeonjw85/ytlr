@@ -3,19 +3,21 @@ use reqwest::Method;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{path::Path, process::Stdio, time::Duration};
-use ytlr_core::{AppPaths, ServiceEndpoint};
+use ytlr_core::{AppPaths, SERVICE_API_VERSION, ServiceEndpoint};
 
-fn compatible(version: &str) -> bool {
-    version
-        .split('.')
-        .take(2)
-        .eq(env!("CARGO_PKG_VERSION").split('.').take(2))
+fn compatible(endpoint: &ServiceEndpoint) -> bool {
+    endpoint.api_version == SERVICE_API_VERSION
+        && endpoint
+            .version
+            .split('.')
+            .take(2)
+            .eq(env!("CARGO_PKG_VERSION").split('.').take(2))
 }
 
-fn version_mismatch(version: &str) -> anyhow::Error {
+fn version_mismatch(endpoint: &ServiceEndpoint) -> anyhow::Error {
     anyhow::anyhow!(
         "실행 중인 서비스 버전({})과 앱 버전({})이 다릅니다. 녹화를 마무리하고 `ytlr shutdown` 후 다시 실행하세요.",
-        version,
+        endpoint.version,
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -79,14 +81,18 @@ impl Client {
         if !path.starts_with('/') || path.contains("://") {
             bail!("잘못된 API 경로");
         }
-        if path != "/health" && path != "/shutdown" && !compatible(&endpoint.version) {
-            return Err(version_mismatch(&endpoint.version));
+        if path != "/health" && path != "/shutdown" && !compatible(&endpoint) {
+            return Err(version_mismatch(&endpoint));
         }
         let send_json = !matches!(method, Method::GET | Method::HEAD | Method::DELETE);
         let mut request = self
             .http
             .request(method, format!("http://127.0.0.1:{}{path}", endpoint.port))
-            .bearer_auth(endpoint.token);
+            .bearer_auth(endpoint.token)
+            .header("x-ytlr-api-version", SERVICE_API_VERSION.to_string());
+        if path.starts_with("/jobs/") && path.contains("/cleanup") {
+            request = request.timeout(Duration::from_secs(3600));
+        }
         if let Some(body) = body
             && send_json
         {
@@ -113,13 +119,14 @@ impl Client {
             Some(endpoint) => endpoint.clone(),
             None => self.paths.endpoint()?,
         };
-        if !compatible(&endpoint.version) {
+        if !compatible(&endpoint) {
             bail!("원격 서비스 버전을 앱과 동일하게 업데이트해 주세요.");
         }
         let response = self
             .http
             .post(format!("http://127.0.0.1:{}/jobs", endpoint.port))
             .bearer_auth(endpoint.token)
+            .header("x-ytlr-api-version", SERVICE_API_VERSION.to_string())
             .header("x-ytlr-fanout", "1")
             .header("idempotency-key", request_id)
             .json(body)
@@ -200,6 +207,7 @@ mod tests {
                 token: "unused".into(),
                 pid: 0,
                 version: "0.1.0".into(),
+                api_version: 0,
             });
         let error = client
             .post::<Value>("/jobs", &serde_json::json!({}))
@@ -207,8 +215,19 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("버전"));
-        assert!(!compatible("0.1.99"));
-        assert!(compatible(env!("CARGO_PKG_VERSION")));
+        let incompatible = ServiceEndpoint {
+            port: 1,
+            token: String::new(),
+            pid: 0,
+            version: env!("CARGO_PKG_VERSION").into(),
+            api_version: 0,
+        };
+        assert!(!compatible(&incompatible));
+        let compatible_endpoint = ServiceEndpoint {
+            api_version: SERVICE_API_VERSION,
+            ..incompatible
+        };
+        assert!(compatible(&compatible_endpoint));
     }
 
     #[tokio::test]
@@ -234,6 +253,7 @@ mod tests {
                 token: "unused".into(),
                 pid: 0,
                 version: env!("CARGO_PKG_VERSION").into(),
+                api_version: SERVICE_API_VERSION,
             });
         let error = client
             .request::<Value>(Method::DELETE, "/jobs/abc", Some(&serde_json::json!({})))

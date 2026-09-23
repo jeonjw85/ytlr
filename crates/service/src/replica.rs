@@ -16,7 +16,7 @@ async fn deliver(
         .context("이중 녹화 원격 설정을 찾을 수 없습니다.")?;
     let tunnel = tunnel::connect(&remote).await?;
     let client = Client::new(state.paths.clone())?.with_endpoint(tunnel.endpoint.clone());
-    let remote_job = if let Some(id) = &delivery.remote_job_id {
+    let mut remote_job = if let Some(id) = &delivery.remote_job_id {
         client
             .get::<Snapshot>("/snapshot")
             .await?
@@ -28,6 +28,8 @@ async fn deliver(
         client
             .replica_record(
                 &RecordRequest {
+                    stop_at: job.stop_at.clone(),
+                    recording_options: job.recording_options.clone(),
                     url: job.url.clone(),
                     live_from_start: Some(job.live_from_start),
                     priority: job.priority,
@@ -36,6 +38,27 @@ async fn deliver(
             )
             .await?
     };
+    if job.stop_requested && !remote_job.state.terminal() {
+        remote_job = client
+            .post(
+                &format!("/jobs/{}/stop", remote_job.id),
+                &serde_json::json!({}),
+            )
+            .await?;
+    }
+    if remote_job.stop_at != job.stop_at
+        && !remote_job.state.terminal()
+        && !remote_job.stop_requested
+        && remote_job.state != JobState::Finalizing
+    {
+        remote_job = client
+            .request(
+                reqwest::Method::PUT,
+                &format!("/jobs/{}/schedule", remote_job.id),
+                Some(&serde_json::json!({"stop_at":job.stop_at})),
+            )
+            .await?;
+    }
     Ok(remote_job)
 }
 
@@ -80,7 +103,11 @@ pub async fn run(state: Arc<Service>) {
                             .as_deref()
                             .and_then(parse_rfc3339)
                             .is_some_and(|t| (chrono::Utc::now() - t).num_seconds() < 30);
-                    replica.state = if remote.state.terminal() {
+                    replica.state = if matches!(remote.state, JobState::Failed | JobState::Partial)
+                        || (remote.state == JobState::Stopped && !job.stop_requested)
+                    {
+                        "failed"
+                    } else if remote.state.terminal() {
                         "finished"
                     } else if receiving {
                         "recording"
@@ -88,7 +115,9 @@ pub async fn run(state: Arc<Service>) {
                         "accepted"
                     }
                     .into();
-                    replica.message = if receiving {
+                    replica.message = if replica.state == "failed" {
+                        "원격 이중 녹화가 정상 완료되지 않았습니다."
+                    } else if receiving {
                         "원격 영상 수신 확인"
                     } else {
                         "원격 요청 접수 · 녹화 상태는 별도 확인"

@@ -14,11 +14,15 @@ pub struct AppPaths {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceEndpoint {
+    #[serde(default)]
+    pub api_version: u32,
     pub port: u16,
     pub token: String,
     pub pid: u32,
     pub version: String,
 }
+
+pub const SERVICE_API_VERSION: u32 = 2;
 
 impl AppPaths {
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self> {

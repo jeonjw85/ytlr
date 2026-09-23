@@ -725,6 +725,45 @@ main {
 .field > input {
   width: 100%;
 }
+.field > textarea {
+  width: 100%;
+  min-height: 72px;
+  padding: 8px;
+  color: inherit;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font: inherit;
+  resize: vertical;
+}
+.job-tool-section {
+  border-top: 1px solid var(--line);
+  margin: 16px 0;
+  padding-top: 12px;
+}
+.job-tool-section p {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.bookmark-row {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.bookmark-note {
+  white-space: pre-wrap;
+}
+.tool-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cleanup-files {
+  max-height: 240px;
+  overflow: auto;
+}
+.cleanup-files span {
+  overflow-wrap: anywhere;
+}
 .field-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

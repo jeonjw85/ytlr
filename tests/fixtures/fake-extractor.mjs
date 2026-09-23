@@ -40,6 +40,18 @@ if (fs.existsSync(path.join(home, "require-auth"))) {
   );
 }
 const id = new URL(url).searchParams.get("v") ?? "channel";
+if (fs.existsSync(path.join(home, `${id}.fail`))) {
+  console.error("fixture extraction failed");
+  process.exit(1);
+}
+const selector = args.includes("--format")
+  ? args[args.indexOf("--format") + 1]
+  : "default";
+const audioOnly = selector === "ba";
+fs.appendFileSync(
+  path.join(home, `${id}.formats`),
+  `${args.includes("--dump-single-json") ? "inspect" : "capture"}:${selector}\n`,
+);
 const counts = path.join(home, `${id}.count`);
 if (args.includes("--flat-playlist")) {
   console.log(
@@ -84,11 +96,19 @@ if (args.includes("--dump-single-json")) {
       live_status:
         id === "qqqqwwwweee"
           ? "is_upcoming"
-          : id === "ffffgggghhh" && count > 0
+          : ["ffffgggghhh", "audioonly01"].includes(id) && count > 0
             ? "was_live"
             : "is_live",
-      requested_formats:
-        id === "ffffgggghhh"
+      requested_formats: audioOnly
+        ? [
+            {
+              format_id: "audio",
+              url: process.env.YTLR_FIXTURE_AUDIO,
+              vcodec: "none",
+              acodec: "aac",
+            },
+          ]
+        : id === "ffffgggghhh"
           ? [
               {
                 format_id: "av",
@@ -126,16 +146,18 @@ console.log(
     JSON.stringify({
       title: `Fixture ${id}`,
       channel: "Test channel",
-      format: "test highest",
+      format: audioOnly ? "audio only" : "test highest",
     }),
 );
-const media = fs.readFileSync(path.join(home, "sample.mkv"));
+const media = fs.readFileSync(
+  path.join(home, audioOnly ? "sample.mka" : "sample.mkv"),
+);
 fs.writeFileSync(`${output}.part`, media);
 let n = 0;
 const timer = setInterval(() => {
   n++;
   fs.writeFileSync(`${output}.part-Frag${n}`, media);
-  for (const track of ["video", "audio"])
+  for (const track of audioOnly ? ["audio"] : ["video", "audio"])
     console.log(
       "[download] __YTLR_PROGRESS__" +
         JSON.stringify({

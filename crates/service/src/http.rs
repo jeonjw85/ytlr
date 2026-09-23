@@ -7,9 +7,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
+use fs2::FileExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::{Arc, atomic::Ordering};
+use std::{
+    fs,
+    sync::{Arc, atomic::Ordering},
+};
 use ytlr_core::*;
 
 struct ApiError(anyhow::Error);
@@ -43,6 +47,18 @@ pub fn router(state: Arc<Service>) -> Router {
         .route("/jobs/{id}/recover", post(recover))
         .route("/jobs/{id}/export", post(export))
         .route("/jobs/{id}/events", get(events))
+        .route("/jobs/{id}/schedule", put(schedule))
+        .route("/jobs/{id}/bookmarks", post(bookmark_add))
+        .route(
+            "/jobs/{id}/bookmarks/{bookmark_id}",
+            put(bookmark_edit).delete(bookmark_delete),
+        )
+        .route("/jobs/{id}/storage", get(job_storage))
+        .route("/jobs/{id}/cleanup/preview", post(cleanup_preview))
+        .route(
+            "/jobs/{id}/cleanup",
+            post(cleanup_execute).layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
+        )
         .route("/channels", post(channel_add))
         .route("/channels/{id}", put(channel_update).delete(channel_delete))
         .route("/settings", put(settings))
@@ -69,7 +85,16 @@ pub fn router(state: Arc<Service>) -> Router {
 
 async fn authorize(State(state): State<Arc<Service>>, req: Request, next: Next) -> Response {
     // No browser CORS: only the native GUI bridge/CLI can call this loopback API.
-    if req.headers().contains_key("origin")
+    let public_compatibility_path = matches!(req.uri().path(), "/health" | "/shutdown");
+    let wrong_api_version = !public_compatibility_path
+        && req
+            .headers()
+            .get("x-ytlr-api-version")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u32>().ok())
+            != Some(SERVICE_API_VERSION);
+    if wrong_api_version
+        || req.headers().contains_key("origin")
         || req
             .headers()
             .get("authorization")
@@ -77,8 +102,12 @@ async fn authorize(State(state): State<Arc<Service>>, req: Request, next: Next) 
             != Some(&format!("Bearer {}", state.token))
     {
         return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"인증되지 않은 로컬 요청"})),
+            if wrong_api_version {
+                StatusCode::UPGRADE_REQUIRED
+            } else {
+                StatusCode::UNAUTHORIZED
+            },
+            Json(json!({"error":if wrong_api_version {"서비스 API 버전이 호환되지 않습니다."} else {"인증되지 않은 로컬 요청"}})),
         )
             .into_response();
     }
@@ -109,6 +138,7 @@ async fn record(
     Ok(Json(s.store.job(&job.id)?))
 }
 async fn delete_job(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<Value> {
+    let _permit = s.finalizer.acquire().await?;
     let job = {
         let active = s.active.lock().await;
         if active.contains_key(&id) {
@@ -118,10 +148,24 @@ async fn delete_job(State(s): State<Arc<Service>>, Path(id): Path<String>) -> Ap
         if !job.state.terminal() {
             return Err(anyhow::anyhow!("녹화가 끝난 후 삭제할 수 있습니다.").into());
         }
+        let lock = if job.output_dir.is_dir() {
+            let lock = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(job.output_dir.join("backup.lock"))?;
+            lock.try_lock_exclusive().map_err(|_| {
+                anyhow::anyhow!("백업 또는 정리가 진행 중입니다. 완료 후 다시 시도하세요.")
+            })?;
+            Some(lock)
+        } else {
+            None
+        };
         s.store.delete_job(&id)?;
-        job
+        (job, lock)
     };
-    if let Err(error) = tokio::fs::remove_dir_all(&job.output_dir).await
+    if let Err(error) = tokio::fs::remove_dir_all(&job.0.output_dir).await
         && error.kind() != std::io::ErrorKind::NotFound
     {
         return Err(
@@ -133,14 +177,161 @@ async fn delete_job(State(s): State<Arc<Service>>, Path(id): Path<String>) -> Ap
 async fn events(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<Vec<JobEvent>> {
     Ok(Json(s.store.events(&id)?))
 }
+
+#[derive(Deserialize)]
+struct ScheduleRequest {
+    stop_at: Option<String>,
+}
+
+async fn schedule(
+    State(s): State<Arc<Service>>,
+    Path(id): Path<String>,
+    Json(req): Json<ScheduleRequest>,
+) -> ApiResult<RecordingJob> {
+    let _active = s.active.lock().await;
+    let job = s.store.set_schedule(&id, req.stop_at.as_deref())?;
+    s.store.event(
+        &id,
+        "schedule",
+        if job.stop_at.is_some() {
+            "종료 예약 변경"
+        } else {
+            "종료 예약 취소"
+        },
+    )?;
+    Ok(Json(job))
+}
+
+async fn bookmark_add(
+    State(s): State<Arc<Service>>,
+    Path(id): Path<String>,
+    Json(req): Json<BookmarkRequest>,
+) -> ApiResult<RecordingJob> {
+    Ok(Json(s.store.add_bookmark(&id, &req)?))
+}
+
+async fn bookmark_edit(
+    State(s): State<Arc<Service>>,
+    Path((id, bookmark_id)): Path<(String, String)>,
+    Json(req): Json<BookmarkRequest>,
+) -> ApiResult<RecordingJob> {
+    let job = s.store.edit_bookmark(&id, &bookmark_id, Some(&req))?;
+    s.store.persist_job_manifest(&id)?;
+    Ok(Json(job))
+}
+
+async fn bookmark_delete(
+    State(s): State<Arc<Service>>,
+    Path((id, bookmark_id)): Path<(String, String)>,
+) -> ApiResult<RecordingJob> {
+    let job = s.store.edit_bookmark(&id, &bookmark_id, None)?;
+    s.store.persist_job_manifest(&id)?;
+    Ok(Json(job))
+}
+
+async fn job_storage(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<Value> {
+    let job = s.store.job(&id)?;
+    let sizes =
+        tokio::task::spawn_blocking(move || ytlr_engine::cleanup::inventory(&job)).await??;
+    Ok(Json(serde_json::to_value(sizes)?))
+}
+
+async fn cleanup_preview(
+    State(s): State<Arc<Service>>,
+    Path(id): Path<String>,
+) -> ApiResult<Value> {
+    cleanup_job(s, id, None).await
+}
+
+async fn cleanup_execute(
+    State(s): State<Arc<Service>>,
+    Path(id): Path<String>,
+    Json(req): Json<ytlr_engine::cleanup::CleanupRequest>,
+) -> ApiResult<Value> {
+    cleanup_job(s, id, Some(req)).await
+}
+
+async fn cleanup_job(
+    s: Arc<Service>,
+    id: String,
+    req: Option<ytlr_engine::cleanup::CleanupRequest>,
+) -> ApiResult<Value> {
+    {
+        let mut active = s.active.lock().await;
+        if active.contains_key(&id) || !s.store.job(&id)?.state.terminal() {
+            return Err(anyhow::anyhow!("진행 중인 작업은 정리할 수 없습니다.").into());
+        }
+        active.insert(id.clone(), s.shutdown.child_token());
+    }
+    // The operation owns its lifetime: disconnecting a client must not release
+    // the maintenance guard while hashing/deletion is still in progress.
+    let task = tokio::spawn(async move {
+        let result = async {
+            let _permit = s.finalizer.acquire().await?;
+            let job = s.store.job(&id)?;
+            if let Some(req) = req {
+                let removed = ytlr_engine::cleanup::execute(&s.tools, &job, &req).await?;
+                let root = job.output_dir.clone();
+                let recount = tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
+                    Ok(ytlr_engine::files_under(&root)?
+                        .iter()
+                        .map(|p| std::fs::metadata(p).map(|m| m.len()))
+                        .collect::<std::io::Result<Vec<_>>>()?
+                        .iter()
+                        .sum())
+                })
+                .await;
+                let mut warnings = vec![];
+                match recount {
+                    Ok(Ok(bytes)) => {
+                        if let Err(error) = s
+                            .store
+                            .update_job(&id, |j| j.bytes = bytes)
+                            .and_then(|_| s.store.persist_job_manifest(&id))
+                        {
+                            warnings.push(format!("정리 후 작업 정보 갱신 실패: {error}"));
+                        }
+                    }
+                    Ok(Err(error)) => warnings.push(format!("정리 후 용량 계산 실패: {error}")),
+                    Err(error) => warnings.push(format!("정리 후 용량 작업 실패: {error}")),
+                }
+                let _ = s.store.event(
+                    &id,
+                    "cleanup",
+                    &format!("선택한 세그먼트 정리 완료 · {removed} bytes · 검증된 결과 보존"),
+                );
+                for warning in &warnings {
+                    let _ = s.store.event(&id, "cleanup_warning", warning);
+                }
+                Ok::<_, anyhow::Error>(json!({"reclaimed_bytes":removed,"warnings":warnings}))
+            } else {
+                Ok(serde_json::to_value(
+                    ytlr_engine::cleanup::preview(&s.tools, &job).await?,
+                )?)
+            }
+        }
+        .await;
+        if let Err(e) = &result {
+            let _ = s.store.event(&id, "cleanup_error", &e.to_string());
+        }
+        s.active.lock().await.remove(&id);
+        result
+    });
+    Ok(Json(task.await??))
+}
 async fn stop(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<RecordingJob> {
     let active = s.active.lock().await;
     let running = active.contains_key(&id);
     let job = s.store.update_job(&id, |j| {
         j.stop_requested = true;
         if !running && !j.state.terminal() {
-            j.state = JobState::Stopped;
-            j.message = "중지했습니다. 저장된 파일은 보관됩니다.".into();
+            if j.attempt > 0 {
+                j.state = JobState::Finalizing;
+                j.message = "중지 요청 · 저장된 파일 정리 대기".into();
+            } else {
+                j.state = JobState::Stopped;
+                j.message = "중지했습니다. 저장된 파일은 보관됩니다.".into();
+            }
         }
     })?;
     if let Some(cancel) = active.get(&id) {
@@ -149,15 +340,19 @@ async fn stop(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResul
     Ok(Json(job))
 }
 async fn retry(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<RecordingJob> {
-    if s.active.lock().await.contains_key(&id) {
+    let active = s.active.lock().await;
+    if active.contains_key(&id) {
         return Err(anyhow::anyhow!("작업이 실행 중입니다.").into());
     }
     let job = s.store.update_job(&id, |j| {
         j.state = JobState::Queued;
+        j.stop_at = None;
+        j.recovery_error = None;
         j.stop_requested = false;
         j.retries = 0;
         j.message = "재시도 대기".into();
     })?;
+    drop(active);
     s.next_checks.lock().await.remove(&id);
     Ok(Json(job))
 }
@@ -173,6 +368,7 @@ async fn recover(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiRe
     active.insert(id.clone(), s.shutdown.child_token());
     s.store.update_job(&id, |j| {
         j.stop_requested = false;
+        j.stop_at = None;
         j.state = JobState::Finalizing;
         j.message = "복구 작업 대기".into();
     })?;
@@ -181,6 +377,7 @@ async fn recover(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiRe
         if let Err(e) = scheduler::finish(&s, &id, false).await {
             let _ = s.store.update_job(&id, |j| {
                 j.state = JobState::Partial;
+                j.recovery_error = Some(redact(&e.to_string()));
                 j.message = format!("복구 실패 · 원본 보존: {e}");
             });
         }
@@ -209,27 +406,36 @@ async fn export(
         .ok_or_else(|| anyhow::anyhow!("영상 파일을 찾을 수 없습니다."))?
         .clone();
     // Separate artifact; failed export never replaces the original MKV.
+    let extension = if job.recording_options.audio_only {
+        "mka"
+    } else {
+        "mp4"
+    };
     let dest = job
         .output_dir
-        .join(format!("export-{}.mp4", uuid::Uuid::new_v4()));
+        .join(format!("export-{}.{extension}", uuid::Uuid::new_v4()));
     let result_path = dest.clone();
     tokio::spawn(async move {
         let Ok(_permit) = s.finalizer.acquire().await else {
             return;
         };
-        match ytlr_engine::remux(&s.tools, &[output.path], &dest).await {
+        match ytlr_engine::remux(&s.tools, &[output.path], &dest, &job.recording_options).await {
             Ok(_) => {
                 let _ = s.store.event(
                     &id,
                     "export",
-                    &format!("MP4 내보내기 완료: {}", dest.display()),
+                    &format!(
+                        "{} 내보내기 완료: {}",
+                        extension.to_uppercase(),
+                        dest.display()
+                    ),
                 );
             }
             Err(e) => {
                 let _ = s.store.event(
                     &id,
                     "export_error",
-                    &format!("MP4 호환성/내보내기 오류: {e}"),
+                    &format!("{} 호환성/내보내기 오류: {e}", extension.to_uppercase()),
                 );
             }
         }
@@ -246,10 +452,32 @@ async fn channel_add(
 async fn channel_update(
     State(s): State<Arc<Service>>,
     Path(id): Path<String>,
-    Json(mut channel): Json<Channel>,
+    Json(body): Json<Value>,
 ) -> ApiResult<Channel> {
-    channel.id = id;
-    channel.url = channel_url(&channel.url)?;
+    let mut channel = s
+        .store
+        .channels()?
+        .into_iter()
+        .find(|channel| channel.id == id)
+        .ok_or_else(|| anyhow::anyhow!("채널을 찾을 수 없습니다."))?;
+    if let Some(value) = body.get("url") {
+        channel.url = channel_url(serde_json::from_value(value.clone())?)?;
+    }
+    if let Some(value) = body.get("name") {
+        channel.name = serde_json::from_value(value.clone())?;
+    }
+    if let Some(value) = body.get("enabled") {
+        channel.enabled = serde_json::from_value(value.clone())?;
+    }
+    if let Some(value) = body.get("priority") {
+        channel.priority = serde_json::from_value(value.clone())?;
+    }
+    if let Some(value) = body.get("recording_options") {
+        channel.recording_options = serde_json::from_value(value.clone())?;
+    }
+    if let Some(value) = body.get("live_from_start") {
+        channel.live_from_start = serde_json::from_value(value.clone())?;
+    }
     s.store.save_channel(&channel)?;
     Ok(Json(channel))
 }
@@ -350,6 +578,7 @@ mod tests {
         let store = Arc::new(Store::open(&paths.database(), &paths.default_settings()).unwrap());
         (
             Arc::new(Service {
+                storage: RwLock::new(vec![]),
                 tools: Tools::new(paths.clone()),
                 store,
                 paths,
@@ -372,6 +601,8 @@ mod tests {
             .store
             .add_job(
                 &RecordRequest {
+                    stop_at: None,
+                    recording_options: RecordingOptions::default(),
                     url: "https://youtu.be/abcdefghijk".into(),
                     live_from_start: None,
                     priority: 0,
@@ -400,6 +631,7 @@ mod tests {
                     .method(method)
                     .uri(uri)
                     .header("authorization", "Bearer test-token")
+                    .header("x-ytlr-api-version", SERVICE_API_VERSION)
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(body))
                     .unwrap(),
@@ -451,6 +683,7 @@ mod tests {
                 token: "test-token".into(),
                 pid: 0,
                 version: env!("CARGO_PKG_VERSION").into(),
+                api_version: ytlr_core::SERVICE_API_VERSION,
             });
         let value: Value = client
             .request(

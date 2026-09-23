@@ -17,7 +17,21 @@ export interface MediaOutput {
   has_audio: boolean;
   verification: string;
 }
+export interface RecordingOptions {
+  audio_only: boolean;
+  max_height: 480 | 720 | 1080 | null;
+}
+export const defaultRecordingOptions: RecordingOptions = {
+  audio_only: false,
+  max_height: null,
+};
 export interface Job {
+  stop_at?: string | null;
+  bookmarks?: Bookmark[];
+  alerts?: JobAlert[];
+  recovery_error?: string | null;
+  recording_options?: RecordingOptions;
+  resolution?: string | null;
   id: string;
   url: string;
   video_id: string;
@@ -80,6 +94,8 @@ export interface TimelineGap {
   } | null;
 }
 export interface Channel {
+  recording_options?: RecordingOptions;
+  live_from_start?: boolean | null;
   id: string;
   url: string;
   name: string;
@@ -111,6 +127,7 @@ export interface Tool {
   error: string | null;
 }
 export interface Snapshot {
+  storage?: StorageStatus[];
   version: string;
   jobs: Job[];
   channels: Channel[];
@@ -120,6 +137,14 @@ export interface Snapshot {
   installing_tools: boolean;
   tool_message: string | null;
   replica_targets?: string[];
+}
+export interface StorageStatus {
+  path: string;
+  free_bytes: number | null;
+  total_bytes: number | null;
+  bytes_per_second: number | null;
+  remaining_seconds: number | null;
+  low_space: boolean;
 }
 export interface Remote {
   id: string;
@@ -136,6 +161,32 @@ export interface JobEvent {
   at: string;
   kind: string;
   message: string;
+}
+
+export interface Bookmark {
+  id: string;
+  title: string;
+  note: string;
+  created_at: string;
+  attempt: number;
+  media_seconds: number | null;
+  received_at: string;
+}
+export interface JobAlert {
+  id: string;
+  kind: string;
+  message: string;
+  active: boolean;
+  opened_at: string;
+  resolved_at: string | null;
+}
+export interface CleanupPlan {
+  id: string;
+  job_id: string;
+  created_at: string;
+  files: { path: string; bytes: number; sha256: string }[];
+  retained: MediaOutput[];
+  reclaimable_bytes: number;
 }
 
 export const stateLabels: Record<JobState, string> = {

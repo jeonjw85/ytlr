@@ -26,7 +26,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function api(path, method = "GET") {
   const response = await fetch(`http://127.0.0.1:${endpoint.port}${path}`, {
     method,
-    headers: { authorization: `Bearer ${endpoint.token}` },
+    headers: {
+      authorization: `Bearer ${endpoint.token}`,
+      "x-ytlr-api-version": String(endpoint.api_version),
+    },
   });
   assert(response.ok);
   return response.json();

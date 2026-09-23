@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod cleanup;
 pub mod media;
 pub mod process;
 pub mod recovery;

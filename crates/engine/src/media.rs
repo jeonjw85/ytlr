@@ -145,6 +145,10 @@ pub fn checkpoint(root: &Path, known: &mut HashSet<PathBuf>) -> Result<u64> {
             Err(e) => return Err(e.into()),
         };
         f.sync_all()?;
+        let opened = f.metadata()?;
+        if opened.len() != size {
+            continue;
+        }
         let mut hash = Sha256::new();
         let mut buffer = [0u8; 64 * 1024];
         loop {
@@ -154,10 +158,14 @@ pub fn checkpoint(root: &Path, known: &mut HashSet<PathBuf>) -> Result<u64> {
             }
             hash.update(&buffer[..n]);
         }
+        let after = f.metadata()?;
+        if after.len() != opened.len() || fs::metadata(&path)?.len() != opened.len() {
+            continue;
+        }
         writeln!(
             log,
             "{}",
-            serde_json::json!({"file": path.strip_prefix(root)?, "bytes": size, "sha256": hex::encode(hash.finalize()), "committed_at": now()})
+            serde_json::json!({"file": path.strip_prefix(root)?, "bytes": opened.len(), "sha256": hex::encode(hash.finalize()), "committed_at": now()})
         )?;
         known.insert(path);
     }
@@ -217,11 +225,17 @@ pub fn closed_segments(root: &Path) -> Result<HashSet<PathBuf>> {
 }
 
 /// Read packet counts from a closed, short segment; headers alone cannot detect missing audio.
-pub async fn segment_has_both_tracks(tools: &Tools, path: &Path) -> Result<bool> {
+pub async fn segment_has_tracks(
+    tools: &Tools,
+    path: &Path,
+    options: &ytlr_core::RecordingOptions,
+) -> Result<bool> {
     let mut cmd = tokio::process::Command::new(tools.require("ffprobe")?);
     cmd.args([
         "-v",
         "error",
+        "-read_intervals",
+        "%+30",
         "-count_packets",
         "-show_entries",
         "stream=codec_type,nb_read_packets",
@@ -247,10 +261,19 @@ pub async fn segment_has_both_tracks(tools: &Tools, path: &Path) -> Result<bool>
             })
         })
     };
-    Ok(has("audio") && has("video"))
+    Ok(has("audio")
+        && if options.audio_only {
+            !has("video")
+        } else {
+            has("video")
+        })
 }
 
-pub async fn discover_outputs(tools: &Tools, root: &Path) -> Result<Vec<MediaOutput>> {
+pub async fn discover_outputs(
+    tools: &Tools,
+    root: &Path,
+    options: &ytlr_core::RecordingOptions,
+) -> Result<Vec<MediaOutput>> {
     let mut outputs = vec![];
     let mut seen_attempts = HashSet::new();
     let mut files = files_under(root)?;
@@ -275,12 +298,16 @@ pub async fn discover_outputs(tools: &Tools, root: &Path) -> Result<Vec<MediaOut
             .unwrap_or_default()
             .to_string_lossy()
             .starts_with("part-")
-            && path
-                .extension()
-                .is_some_and(|ext| ext == "mkv" || ext == "mp4" || ext == "webm")
+            && path.extension().is_some_and(|ext| {
+                ext == "mkv"
+                    || ext == "mp4"
+                    || ext == "webm"
+                    || ext == "mka"
+                    || ext == "m4a"
+                    || ext == "opus"
+            })
             && let Ok(media) = probe(tools, &path).await
-            && media.has_video
-            && media.has_audio
+            && options.accepts(&media)
             && media.duration > 0.0
         {
             outputs.push(media);
@@ -359,11 +386,17 @@ pub fn verify_ledger(root: &Path) -> Result<Vec<String>> {
 }
 
 /// Never concat unknown retry boundaries. Salvage each attempt independently with stream-copy.
-pub async fn salvage_attempt(tools: &Tools, root: &Path) -> Result<Option<MediaOutput>> {
+pub async fn salvage_attempt(
+    tools: &Tools,
+    root: &Path,
+    options: &ytlr_core::RecordingOptions,
+) -> Result<Option<MediaOutput>> {
     let mut segments: Vec<_> = closed_segments(root)?.into_iter().collect();
     segments.sort();
     if !segments.is_empty() {
-        return concat_segments(tools, root, &segments).await.map(Some);
+        return concat_segments(tools, root, &segments, options)
+            .await
+            .map(Some);
     }
     let folder = root.to_owned();
     tokio::task::spawn_blocking(move || rebuild_native_fragments(&folder)).await??;
@@ -399,7 +432,11 @@ pub async fn salvage_attempt(tools: &Tools, root: &Path) -> Result<Option<MediaO
         }
     }
     let mut inputs = vec![];
-    if let Some((p, _)) = combined {
+    if options.audio_only {
+        if let Some((p, _)) = audio.or(combined) {
+            inputs.push(p);
+        }
+    } else if let Some((p, _)) = combined {
         inputs.push(p);
     } else if let (Some((v, _)), Some((a, _))) = (video, audio) {
         inputs.extend([v, a]);
@@ -408,7 +445,7 @@ pub async fn salvage_attempt(tools: &Tools, root: &Path) -> Result<Option<MediaO
         return Ok(None);
     }
     let dest = root.join(format!("recovered-{}.mkv", uuid::Uuid::new_v4()));
-    remux(tools, &inputs, &dest).await.map(Some)
+    remux(tools, &inputs, &dest, options).await.map(Some)
 }
 
 /// Rebuild a missing/truncated aggregate from contiguous native fragments, without replacing it.
@@ -459,12 +496,17 @@ pub fn rebuild_native_fragments(root: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn concat_segments(tools: &Tools, root: &Path, segments: &[PathBuf]) -> Result<MediaOutput> {
+async fn concat_segments(
+    tools: &Tools,
+    root: &Path,
+    segments: &[PathBuf],
+    options: &ytlr_core::RecordingOptions,
+) -> Result<MediaOutput> {
     let mut lines = String::from("ffconcat version 1.0\n");
     let mut signature = None;
     for path in segments {
         let media = probe(tools, path).await?;
-        if !media.has_video || !media.has_audio {
+        if !options.accepts(&media) {
             bail!("영상·음성이 없는 세그먼트가 있습니다. 원본을 보존합니다.");
         }
         let mut cmd = tokio::process::Command::new(tools.require("ffprobe")?);
@@ -508,12 +550,13 @@ async fn concat_segments(tools: &Tools, root: &Path, segments: &[PathBuf]) -> Re
     cmd.args([
         "-v", "error", "-nostdin", "-n", "-f", "concat", "-safe", "1", "-i",
     ])
-    .arg(&list)
-    .args([
-        "-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-f", "matroska",
-    ])
-    .arg(&temp)
-    .kill_on_drop(true);
+    .arg(&list);
+    if !options.audio_only {
+        cmd.args(["-map", "0:v:0"]);
+    }
+    cmd.args(["-map", "0:a:0", "-c", "copy", "-f", "matroska"])
+        .arg(&temp)
+        .kill_on_drop(true);
     process::hide_console(&mut cmd);
     let result = cmd.output().await?;
     if !result.status.success() {
@@ -523,7 +566,7 @@ async fn concat_segments(tools: &Tools, root: &Path, segments: &[PathBuf]) -> Re
         );
     }
     let output = probe(tools, &temp).await?;
-    if output.duration <= 0.0 || !output.has_audio || !output.has_video {
+    if output.duration <= 0.0 || !options.accepts(&output) {
         bail!("병합 결과 검증 실패");
     }
     fs::OpenOptions::new()
@@ -540,7 +583,12 @@ async fn concat_segments(tools: &Tools, root: &Path, segments: &[PathBuf]) -> Re
     })
 }
 
-pub async fn remux(tools: &Tools, inputs: &[PathBuf], dest: &Path) -> Result<MediaOutput> {
+pub async fn remux(
+    tools: &Tools,
+    inputs: &[PathBuf],
+    dest: &Path,
+    options: &ytlr_core::RecordingOptions,
+) -> Result<MediaOutput> {
     if dest.exists() {
         bail!("출력 파일이 이미 존재합니다.");
     }
@@ -556,7 +604,9 @@ pub async fn remux(tools: &Tools, inputs: &[PathBuf], dest: &Path) -> Result<Med
     for input in inputs {
         cmd.arg("-i").arg(input);
     }
-    if inputs.len() == 2 {
+    if options.audio_only {
+        cmd.args(["-map", "0:a:0"]);
+    } else if inputs.len() == 2 {
         cmd.args(["-map", "0:v:0", "-map", "1:a:0"]);
     } else {
         cmd.args(["-map", "0:v:0", "-map", "0:a:0"]);
@@ -573,7 +623,7 @@ pub async fn remux(tools: &Tools, inputs: &[PathBuf], dest: &Path) -> Result<Med
         );
     }
     let media = probe(tools, &temp).await?;
-    if !media.has_video || !media.has_audio || media.duration <= 0.0 {
+    if !options.accepts(&media) || media.duration <= 0.0 {
         bail!("결과 파일의 영상·음성 검증 실패");
     }
     fs::OpenOptions::new()

@@ -10,6 +10,7 @@ import {
   rename,
   readdir,
   stat,
+  unlink,
 } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createReadStream } from "node:fs";
@@ -68,8 +69,23 @@ const convert = spawnSync("ffmpeg", [
   join(home, "sample.mp4"),
 ]);
 assert.equal(convert.status, 0);
-const source = await readFile(join(home, "sample.mp4"));
+const mediaSource = await readFile(join(home, "sample.mp4"));
+assert.equal(
+  spawnSync("ffmpeg", [
+    "-v",
+    "error",
+    "-i",
+    join(home, "sample.mkv"),
+    "-vn",
+    "-c:a",
+    "copy",
+    join(home, "sample.mka"),
+  ]).status,
+  0,
+);
+const audioSource = await readFile(join(home, "sample.mka"));
 const server = createServer((req, res) => {
+  const source = req.url === "/sample.mka" ? audioSource : mediaSource;
   const match = /bytes=(\d+)-(\d*)/.exec(req.headers.range ?? "");
   const start = match ? Number(match[1]) : 0,
     end = match?.[2] ? Number(match[2]) : source.length - 1;
@@ -97,6 +113,7 @@ const env = {
     encoding: "utf8",
   }).stdout.trim(),
   YTLR_FIXTURE_MEDIA: `http://127.0.0.1:${server.address().port}/sample.mp4`,
+  YTLR_FIXTURE_AUDIO: `http://127.0.0.1:${server.address().port}/sample.mka`,
 };
 let daemon;
 let endpoint;
@@ -117,9 +134,11 @@ async function until(callback, label, seconds = 40) {
 }
 async function request(path, method = "GET", body) {
   const r = await fetch(`http://127.0.0.1:${endpoint.port}${path}`, {
+    signal: AbortSignal.timeout(20000),
     method,
     headers: {
       authorization: `Bearer ${endpoint.token}`,
+      "x-ytlr-api-version": String(endpoint.api_version),
       "content-type": "application/json",
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
@@ -142,6 +161,7 @@ async function start() {
 }
 try {
   await start();
+  console.log("[integration] service/authentication and recording lifecycle");
   const unauthorized = await fetch(
     `http://127.0.0.1:${endpoint.port}/snapshot`,
   );
@@ -149,6 +169,7 @@ try {
   const badOrigin = await fetch(`http://127.0.0.1:${endpoint.port}/snapshot`, {
     headers: {
       authorization: `Bearer ${endpoint.token}`,
+      "x-ytlr-api-version": String(endpoint.api_version),
       origin: "https://example.test",
     },
   });
@@ -178,6 +199,8 @@ try {
   const first = await request("/jobs", "POST", {
     url: "https://youtu.be/abcdefghijk",
     live_from_start: true,
+    recording_options: { audio_only: false, max_height: 480 },
+    stop_at: new Date(Date.now() + 3600000).toISOString(),
   });
   const duplicate = await request("/jobs", "POST", {
     url: "https://youtube.com/live/abcdefghijk",
@@ -190,6 +213,24 @@ try {
     const s = await request("/snapshot");
     return s.jobs.find((j) => j.id === first.id)?.last_media_at;
   }, "native progress");
+  const marked = await request(`/jobs/${first.id}/bookmarks`, "POST", {
+    title: "First marker",
+    note: "Before restart",
+  });
+  assert.equal(marked.bookmarks[0].attempt, 1);
+  assert.equal(
+    marked.bookmarks[0].media_seconds,
+    null,
+    "native wall-clock marker must not invent a playback offset",
+  );
+  const bookmark = marked.bookmarks[0];
+  await request(`/jobs/${second.id}/schedule`, "PUT", {
+    stop_at: new Date(Date.now() + 3600000).toISOString(),
+  });
+  const cancelled = await request(`/jobs/${second.id}/schedule`, "PUT", {
+    stop_at: null,
+  });
+  assert.equal(cancelled.stop_at, null);
   snap = await request("/snapshot");
   assert.equal(
     snap.jobs.find((j) => j.id === second.id).state,
@@ -265,6 +306,10 @@ try {
     (await readFile(join(home, "auth-checked"), "utf8")).includes("checked"),
     "extractor actually consumed auth config",
   );
+  const overdue = await request("/jobs", "POST", {
+    url: "https://youtu.be/deadline001",
+    stop_at: new Date(Date.now() + 1000).toISOString(),
+  });
   daemon.kill("SIGKILL");
   await until(
     async () => !(await readdir(home)).some((n) => n.startsWith("active-")),
@@ -276,13 +321,41 @@ try {
     "committed data survives SIGKILL",
   );
   await writeFile(join(home, "version-fail-once"), "1");
+  await sleep(1500);
   await start();
+  await until(async () => {
+    const job = (await request("/snapshot")).jobs.find(
+      (j) => j.id === overdue.id,
+    );
+    assert.equal(
+      job.attempt,
+      0,
+      "expired queued job must never start after a restart",
+    );
+    return job.state === "stopped";
+  }, "deadline expired while service was down");
   await until(async () => {
     const j = (await request("/snapshot")).jobs.find((j) => j.id === first.id);
     return j.attempt >= 2;
   }, "restart recovery");
   const recovered = (await request("/snapshot")).jobs.find(
     (j) => j.id === first.id,
+  );
+  assert.equal(recovered.stop_at, first.stop_at);
+  assert.equal(recovered.bookmarks[0].id, bookmark.id);
+  assert.equal(recovered.bookmarks[0].note, "Before restart");
+  assert.deepEqual(recovered.recording_options, {
+    audio_only: false,
+    max_height: 480,
+  });
+  const selectors = (await readFile(join(home, "abcdefghijk.formats"), "utf8"))
+    .trim()
+    .split("\n");
+  assert(selectors.includes("capture:bv*[height<=480]+ba/b[height<=480]"));
+  assert(
+    selectors
+      .filter((s) => s.startsWith("inspect:"))
+      .every((s) => s === "inspect:bv*[height<=480]+ba/b[height<=480]"),
   );
   assert.equal(
     recovered.continuity_uncertain,
@@ -297,11 +370,29 @@ try {
     recovered.gaps.some((g) => g.after_attempt === 1 && g.seconds >= 0),
     "restart must record the missing wall-clock range",
   );
-  await request(`/jobs/${first.id}/stop`, "POST", {});
+  await request(`/jobs/${first.id}/schedule`, "PUT", {
+    stop_at: new Date(Date.now() - 1000).toISOString(),
+  });
   await until(async () => {
     const j = (await request("/snapshot")).jobs.find((j) => j.id === first.id);
     return ["partial", "stopped", "failed"].includes(j.state);
   }, "stopped job finalization");
+  assert.equal(
+    (await request(`/jobs/${first.id}/events`)).filter(
+      (e) => e.kind === "scheduled_stop",
+    ).length,
+    1,
+  );
+  await request(`/jobs/${first.id}/bookmarks/${bookmark.id}`, "PUT", {
+    title: "Edited marker",
+    note: "After restart",
+  });
+  const metadata = JSON.parse(
+    await readFile(join(first.output_dir, "recording.json"), "utf8"),
+  );
+  assert.equal(metadata.bookmarks[0].title, "Edited marker");
+  assert.equal(metadata.bookmarks[0].created_at, bookmark.created_at);
+  console.log("[integration] restart deadline and bookmark persistence passed");
   await request(`/jobs/${first.id}/recover`, "POST", {});
   await until(
     async () => {
@@ -365,9 +456,106 @@ try {
     const st = await stat(exported.path);
     return st.size > 0;
   }, "MP4 export");
+  const outputBeforeCleanup = await readFile(finished.outputs[0].path);
+  const exportBeforeCleanup = await readFile(exported.path);
+  const inventory = await request(`/jobs/${ff.id}/storage`);
+  assert(
+    inventory.results > 0 && inventory.segments > 0 && inventory.exports > 0,
+  );
+  const preview = await request(`/jobs/${ff.id}/cleanup/preview`, "POST", {});
+  assert(preview.files.length >= 3);
+  await assert.rejects(() =>
+    request(`/jobs/${ff.id}/cleanup`, "POST", {
+      plan_id: "outdated",
+      all: true,
+    }),
+  );
+  const cleaned = await request(`/jobs/${ff.id}/cleanup`, "POST", {
+    plan_id: preview.id,
+    files: [preview.files[0].path],
+  });
+  assert.equal(cleaned.reclaimed_bytes, preview.files[0].bytes);
+  assert.deepEqual(
+    await readFile(finished.outputs[0].path),
+    outputBeforeCleanup,
+  );
+  assert.deepEqual(await readFile(exported.path), exportBeforeCleanup);
+  console.log(
+    "[integration] video segmentation/export/selective cleanup passed",
+  );
+  await assert.rejects(() =>
+    request(`/jobs/${ff.id}/cleanup`, "POST", {
+      plan_id: preview.id,
+      all: true,
+    }),
+  );
+  await assert.rejects(
+    () => request(`/jobs/${first.id}/cleanup/preview`, "POST", {}),
+    "uncertain continuity must prevent cleanup",
+  );
+  const audio = await request("/jobs", "POST", {
+    url: "https://youtu.be/audioonly01",
+    live_from_start: false,
+    recording_options: { audio_only: true, max_height: null },
+  });
+  const audioFinished = await until(async () => {
+    const job = (await request("/snapshot")).jobs.find(
+      (j) => j.id === audio.id,
+    );
+    return job.state === "completed" && job;
+  }, "audio-only segmentation and finalization");
+  assert(audioFinished.outputs.length > 0);
+  assert(audioFinished.outputs.every((o) => o.has_audio && !o.has_video));
+  assert(audioFinished.outputs[0].duration >= 64);
+  const audioExport = await request(`/jobs/${audio.id}/export`, "POST", {
+    index: 0,
+  });
+  assert(audioExport.path.endsWith(".mka"));
+  await until(
+    async () => (await stat(audioExport.path)).size > 0,
+    "audio export",
+  );
+  const audioProbe = JSON.parse(
+    spawnSync(
+      "ffprobe",
+      ["-v", "error", "-show_streams", "-of", "json", audioExport.path],
+      { encoding: "utf8" },
+    ).stdout,
+  );
+  assert.deepEqual(
+    audioProbe.streams.map((s) => s.codec_type),
+    ["audio"],
+  );
+  // Native (from-start) source recovery must also accept audio without video.
+  const nativeAudio = await request("/jobs", "POST", {
+    url: "https://youtu.be/audionative",
+    live_from_start: true,
+    recording_options: { audio_only: true, max_height: null },
+  });
+  await until(async () => {
+    const job = (await request("/snapshot")).jobs.find(
+      (j) => j.id === nativeAudio.id,
+    );
+    return job.last_media_at && job.bytes > 0;
+  }, "native audio data");
+  await request(`/jobs/${nativeAudio.id}/schedule`, "PUT", {
+    stop_at: new Date(Date.now() - 1000).toISOString(),
+  });
+  await until(async () => {
+    const job = (await request("/snapshot")).jobs.find(
+      (j) => j.id === nativeAudio.id,
+    );
+    return (
+      job.state === "stopped" &&
+      job.outputs.some((o) => o.has_audio && !o.has_video)
+    );
+  }, "native audio source salvage");
+  console.log("[integration] audio-only segmentation/export/recovery passed");
   const channel = await request("/channels", "POST", {
     url: "https://youtube.com/@fixture",
     name: "Fixture",
+    recording_options: { audio_only: true, max_height: null },
+    live_from_start: true,
   });
   await until(async () => {
     const s = await request("/snapshot");
@@ -379,9 +567,65 @@ try {
   const waiting = (await request("/snapshot")).jobs.find(
     (j) => j.video_id === "qqqqwwwweee",
   );
+  assert.deepEqual(waiting.recording_options, channel.recording_options);
+  assert.equal(waiting.live_from_start, true);
   await request(`/jobs/${waiting.id}/stop`, "POST", {});
+  snap = await request("/snapshot");
+  await request("/settings", "PUT", { ...snap.settings, max_retries: 0 });
+  await writeFile(join(home, "alertfail01.fail"), "1");
+  const failed = await request("/jobs", "POST", {
+    url: "https://youtu.be/alertfail01",
+    live_from_start: true,
+  });
+  await until(
+    async () =>
+      (await request("/snapshot")).jobs
+        .find((j) => j.id === failed.id)
+        .alerts.some((a) => a.kind === "recording_failed" && a.active),
+    "persistent failure alert",
+  );
+  await sleep(5500);
+  assert.equal(
+    (await request(`/jobs/${failed.id}/events`)).filter(
+      (e) => e.kind === "alert_opened",
+    ).length,
+    1,
+    "same incident is not repeatedly notified",
+  );
+  await unlink(join(home, "alertfail01.fail"));
+  await request(`/jobs/${failed.id}/retry`, "POST", {});
+  await until(
+    async () =>
+      (await request("/snapshot")).jobs
+        .find((j) => j.id === failed.id)
+        .alerts.some(
+          (a) => a.kind === "recording_failed" && !a.active && a.resolved_at,
+        ),
+    "recovery notification after media resumes",
+  );
+  await request(`/jobs/${failed.id}/stop`, "POST", {});
+  await until(
+    async () =>
+      (await request("/snapshot")).jobs.find((j) => j.id === failed.id)
+        .state === "stopped",
+    "alert fixture stopped",
+  );
   console.log(
-    "PASS: authenticated IPC, deduplication, concurrency, stop, SIGKILL recovery, orphan cleanup, media segmentation/merge/export, channel monitoring, scheduled waiting",
+    "[integration] channel defaults, storage, and alert lifecycle passed",
+  );
+  snap = await request("/snapshot");
+  await request("/settings", "PUT", {
+    ...snap.settings,
+    min_free_bytes: snap.free_bytes + 1024,
+  });
+  const low = await until(
+    async () =>
+      (await request("/snapshot")).storage.find((disk) => disk.low_space),
+    "low disk early warning",
+  );
+  assert(low.free_bytes > 0 && low.total_bytes >= low.free_bytes);
+  console.log(
+    "PASS: authenticated IPC, deduplication, concurrency, stop timers and restart expiry, bookmarks, SIGKILL recovery, orphan cleanup, video/audio segmentation and export, verified selective cleanup, alert deduplication/recovery, channel defaults and scheduled waiting",
   );
   console.log(`Integration artifacts: ${home}`);
 } finally {
@@ -395,5 +639,6 @@ try {
     ]);
     if (daemon.exitCode === null) daemon.kill("SIGKILL");
   }
+  server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
 }
