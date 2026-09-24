@@ -913,6 +913,13 @@ main {
   margin-top: 10px;
   line-height: 1.5;
 }
+.inline-success {
+  font-size: 12px;
+  color: var(--success, #79c9a3);
+  overflow-wrap: anywhere;
+  margin-top: 10px;
+  line-height: 1.5;
+}
 .detail-title h3 {
   font-size: 16px;
   margin: 10px 0 6px;

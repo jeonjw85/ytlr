@@ -114,7 +114,9 @@ async fn cleanup_revalidates_preserves_results_and_keeps_backup_ledger_truthful(
     )
     .await
     .unwrap();
-    assert_eq!(removed, plan.files[0].bytes);
+    assert_eq!(removed.reclaimed_bytes, plan.files[0].bytes);
+    assert!(removed.completed);
+    assert!(removed.pending_files.is_empty());
     assert!(!candidate.exists());
     assert!(verify_ledger(&attempt).unwrap().is_empty());
     assert_eq!(fs::read(&output.path).unwrap(), result_bytes);

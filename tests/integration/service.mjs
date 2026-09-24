@@ -479,6 +479,8 @@ try {
     files: [preview.files[0].path],
   });
   assert.equal(cleaned.reclaimed_bytes, preview.files[0].bytes);
+  assert.equal(cleaned.completed, true);
+  assert.deepEqual(cleaned.pending_files, []);
   assert.deepEqual(
     await readFile(finished.outputs[0].path),
     outputBeforeCleanup,

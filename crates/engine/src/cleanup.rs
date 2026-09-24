@@ -35,6 +35,13 @@ pub struct CleanupRequest {
     pub files: Vec<PathBuf>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanupResult {
+    pub reclaimed_bytes: u64,
+    pub pending_files: Vec<PathBuf>,
+    pub completed: bool,
+}
+
 #[derive(Deserialize)]
 struct LedgerEntry {
     file: PathBuf,
@@ -313,7 +320,11 @@ pub async fn preview(tools: &Tools, job: &RecordingJob) -> Result<CleanupPlan> {
     Ok(plan)
 }
 
-pub async fn execute(tools: &Tools, job: &RecordingJob, req: &CleanupRequest) -> Result<u64> {
+pub async fn execute(
+    tools: &Tools,
+    job: &RecordingJob,
+    req: &CleanupRequest,
+) -> Result<CleanupResult> {
     eligible(job)?;
     let _lock = lock_backup(&job.output_dir)?;
     let recovery_root = job.output_dir.clone();
@@ -347,7 +358,7 @@ pub async fn execute(tools: &Tools, job: &RecordingJob, req: &CleanupRequest) ->
     }
     let root = job.output_dir.clone();
     // Keep the cross-process lock inside the blocking task even if the HTTP caller disconnects.
-    tokio::task::spawn_blocking(move || -> Result<u64> {
+    tokio::task::spawn_blocking(move || -> Result<CleanupResult> {
         let _lock = _lock;
         let receipt = root.join(format!("cleanup-{}.json", plan.id));
         atomic_write(&receipt, &serde_json::to_vec_pretty(&serde_json::json!({"plan":plan,"selected":selected,"started_at":now(),"completed":false}))?)?;
@@ -438,13 +449,64 @@ pub async fn execute(tools: &Tools, job: &RecordingJob, req: &CleanupRequest) ->
             let _ = fs::remove_file(root.join("cleanup-plan.json"));
             let _ = sync_dir(&root);
         }
-        Ok(reclaimed)
+        Ok(CleanupResult {
+            reclaimed_bytes: reclaimed,
+            pending_files: pending,
+            completed,
+        })
     }).await?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn interrupted_cleanup(root: &Path, ledger_committed: bool) -> (CleanupPlan, PathBuf, PathBuf) {
+        let attempt = root.join("attempt-0001");
+        fs::create_dir_all(&attempt).unwrap();
+        let bytes = b"committed segment";
+        let pending =
+            attempt.join(".cleanup-123e4567-e89b-12d3-a456-426614174000-part-000.mkv.pending");
+        fs::write(&pending, bytes).unwrap();
+        let (size, sha256) = file_digest(&pending).unwrap();
+        let original = attempt.join("part-000.mkv");
+        let file = CleanupFile {
+            path: PathBuf::from("attempt-0001/part-000.mkv"),
+            bytes: size,
+            sha256: sha256.clone(),
+        };
+        let plan = CleanupPlan {
+            id: "123e4567-e89b-12d3-a456-426614174000".into(),
+            job_id: "job-1".into(),
+            created_at: now(),
+            files: vec![file],
+            retained: vec![],
+            reclaimable_bytes: size,
+        };
+        let ledger = if ledger_committed {
+            String::new()
+        } else {
+            format!(
+                "{}\n",
+                serde_json::json!({"file":"part-000.mkv","bytes":size,"sha256":sha256})
+            )
+        };
+        fs::write(attempt.join("durable-fragments.jsonl"), ledger).unwrap();
+        let receipt = serde_json::json!({
+            "plan": plan,
+            "selected": ["attempt-0001/part-000.mkv"],
+            "started_at": now(),
+            "completed": false,
+        });
+        atomic_write(
+            &root.join("cleanup-123e4567-e89b-12d3-a456-426614174000.json"),
+            &serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        let plan = serde_json::from_value(receipt["plan"].clone()).unwrap();
+        (plan, original, pending)
+    }
+
     #[test]
     fn cleanup_paths_reject_traversal_and_links() {
         let d = tempfile::tempdir().unwrap();
@@ -460,5 +522,36 @@ mod tests {
             assert!(checked_path(&root, Path::new("part-001.mkv")).is_err());
             assert_eq!(fs::read(outside).unwrap(), b"keep");
         }
+    }
+
+    #[test]
+    fn crash_after_quarantine_before_ledger_commit_restores_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, original, pending) = interrupted_cleanup(dir.path(), false);
+
+        recover_quarantined(dir.path()).unwrap();
+
+        assert!(original.is_file());
+        assert!(!pending.exists());
+        assert_eq!(
+            file_digest(&original).unwrap(),
+            (plan.files[0].bytes, plan.files[0].sha256.clone())
+        );
+    }
+
+    #[test]
+    fn crash_after_ledger_commit_finishes_removing_quarantine() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_plan, original, pending) = interrupted_cleanup(dir.path(), true);
+
+        recover_quarantined(dir.path()).unwrap();
+
+        assert!(!original.exists());
+        assert!(!pending.exists());
+        assert!(
+            committed_files(&dir.path().join("attempt-0001"))
+                .unwrap()
+                .is_empty()
+        );
     }
 }

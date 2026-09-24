@@ -369,6 +369,12 @@ export function JobCleanup({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [result, setResult] = useState<{
+    reclaimed_bytes: number;
+    pending_files: string[];
+    completed: boolean;
+    warnings: string[];
+  } | null>(null);
   useEffect(() => {
     let live = true;
     void api<Record<string, number>>(`/jobs/${job.id}/storage`)
@@ -409,6 +415,7 @@ export function JobCleanup({
         onClick={async () => {
           setBusy(true);
           setError("");
+          setResult(null);
           setPlan(null);
           try {
             const next = await api<CleanupPlan>(
@@ -482,11 +489,17 @@ export function JobCleanup({
                 setBusy(true);
                 setError("");
                 try {
-                  await api(`/jobs/${job.id}/cleanup`, "POST", {
+                  const cleanup = await api<{
+                    reclaimed_bytes: number;
+                    pending_files: string[];
+                    completed: boolean;
+                    warnings: string[];
+                  }>(`/jobs/${job.id}/cleanup`, "POST", {
                     plan_id: plan.id,
                     files: [...selected],
                   });
                   setPlan(null);
+                  setResult(cleanup);
                   setSizes(await api(`/jobs/${job.id}/storage`));
                   await onChanged();
                 } catch (error) {
@@ -505,6 +518,35 @@ export function JobCleanup({
         <p className="inline-error" role="alert">
           {t(error)}
         </p>
+      )}
+      {result && (
+        <div
+          className={result.completed ? "inline-success" : "inline-error"}
+          role={result.completed ? "status" : "alert"}
+        >
+          <p>
+            {t(result.completed ? "정리 완료 · 회수 용량 {size}" : "정리 일부 완료 · 회수 용량 {size}", {
+              size: bytes(result.reclaimed_bytes),
+            })}
+          </p>
+          {!!result.pending_files.length && (
+            <>
+              <p>{t("삭제 대기 파일 · 다음 정리 때 다시 처리합니다.")}</p>
+              <ul>
+                {result.pending_files.map((file) => (
+                  <li key={file}>{file}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {!!result.warnings.length && (
+            <ul>
+              {result.warnings.map((warning) => (
+                <li key={warning}>{t(warning)}</li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
     </section>
   );

@@ -47,6 +47,11 @@ export const english: Record<string, string> = {
   "선택한 세그먼트를 영구 삭제할까요? 검증된 결과 파일은 보존됩니다.":
     "Permanently delete the selected segments? Verified result files will be kept.",
   "선택 파일 영구 삭제": "Permanently delete selected files",
+  "정리 완료 · 회수 용량 {size}": "Cleanup complete · {size} reclaimed",
+  "정리 일부 완료 · 회수 용량 {size}":
+    "Cleanup partially complete · {size} reclaimed",
+  "삭제 대기 파일 · 다음 정리 때 다시 처리합니다.":
+    "Files awaiting deletion · They will be retried during the next cleanup.",
   "녹화 이상 알림": "Recording problem",
   "녹화 알림 해제": "Recording alert cleared",
   "상태 알림": "Status alerts",

@@ -349,7 +349,14 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
           };
         if (args.path.endsWith("/cleanup")) {
           cleanupRequests.push(args.body);
-          return { reclaimed_bytes: 1000 };
+          return {
+            reclaimed_bytes: 1000,
+            pending_files: [
+              "attempt-0002/.cleanup-plan-1-part-002.mkv.pending",
+            ],
+            completed: false,
+            warnings: [],
+          };
         }
       }
       throw new Error(
@@ -439,6 +446,12 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
     plan_id: "plan-1",
     files: ["attempt-0002/part-001.mkv"],
   });
+  await expect(
+    page.getByRole("alert").getByText(/Cleanup partially complete/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/\.cleanup-plan-1-part-002\.mkv\.pending/),
+  ).toBeVisible();
   await page
     .getByRole("button", { name: "Delete bookmark", exact: true })
     .click();

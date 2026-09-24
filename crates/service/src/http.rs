@@ -269,7 +269,7 @@ async fn cleanup_job(
             let _permit = s.finalizer.acquire().await?;
             let job = s.store.job(&id)?;
             if let Some(req) = req {
-                let removed = ytlr_engine::cleanup::execute(&s.tools, &job, &req).await?;
+                let cleanup = ytlr_engine::cleanup::execute(&s.tools, &job, &req).await?;
                 let root = job.output_dir.clone();
                 let recount = tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
                     Ok(ytlr_engine::files_under(&root)?
@@ -297,12 +297,26 @@ async fn cleanup_job(
                 let _ = s.store.event(
                     &id,
                     "cleanup",
-                    &format!("선택한 세그먼트 정리 완료 · {removed} bytes · 검증된 결과 보존"),
+                    &format!(
+                        "세그먼트 정리 {} · {} bytes 회수 · 격리 파일 {}개",
+                        if cleanup.completed {
+                            "완료"
+                        } else {
+                            "일부 완료"
+                        },
+                        cleanup.reclaimed_bytes,
+                        cleanup.pending_files.len()
+                    ),
                 );
                 for warning in &warnings {
                     let _ = s.store.event(&id, "cleanup_warning", warning);
                 }
-                Ok::<_, anyhow::Error>(json!({"reclaimed_bytes":removed,"warnings":warnings}))
+                Ok::<_, anyhow::Error>(json!({
+                    "reclaimed_bytes":cleanup.reclaimed_bytes,
+                    "pending_files":cleanup.pending_files,
+                    "completed":cleanup.completed,
+                    "warnings":warnings
+                }))
             } else {
                 Ok(serde_json::to_value(
                     ytlr_engine::cleanup::preview(&s.tools, &job).await?,
