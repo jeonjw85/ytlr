@@ -1057,6 +1057,31 @@ main {
   color: var(--muted);
   padding: 64px;
 }
+.library-filters {
+  border: 0;
+  padding: 0;
+  margin-bottom: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+}
+.library-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+}
+.library-row {
+  flex-wrap: wrap;
+}
+.automation-log {
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
 .loading p {
   font-size: 12px;
   margin-top: 12px;

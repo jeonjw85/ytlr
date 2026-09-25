@@ -90,7 +90,9 @@ impl Client {
             .request(method, format!("http://127.0.0.1:{}{path}", endpoint.port))
             .bearer_auth(endpoint.token)
             .header("x-ytlr-api-version", SERVICE_API_VERSION.to_string());
-        if path.starts_with("/jobs/") && path.contains("/cleanup") {
+        if path.starts_with("/jobs/")
+            && (path.contains("/cleanup") || path.ends_with("/clip") || path.contains("/export"))
+        {
             request = request.timeout(Duration::from_secs(3600));
         }
         if let Some(body) = body

@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod updates;
+
 use std::{
     path::PathBuf,
     sync::{
@@ -13,6 +15,7 @@ use ytlr_core::{AppPaths, RecordingJob, Remote, Snapshot};
 use ytlr_service::{client::Client, tunnel::Tunnel};
 
 struct Bridge {
+    local_gate: tokio::sync::RwLock<()>,
     local: Client,
     executable: PathBuf,
     close_to_tray: AtomicBool,
@@ -77,6 +80,11 @@ async fn api(
             session.lease(expected_target.as_deref().unwrap_or("local"))?,
             session.generation,
         )
+    };
+    let _local_gate = if lease.is_none() {
+        Some(bridge.local_gate.read().await)
+    } else {
+        None
     };
     let client = if let Some(tunnel) = &lease {
         bridge.local.clone().with_endpoint(tunnel.endpoint.clone())
@@ -262,6 +270,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let paths = AppPaths::resolve(None)?;
             let name = if cfg!(windows) { "ytlr.exe" } else { "ytlr" };
@@ -274,6 +283,7 @@ fn main() {
                     .join(name)
             };
             app.manage(Bridge {
+                local_gate: tokio::sync::RwLock::new(()),
                 local: Client::new(paths.clone())?
                     .with_bundled_tools(app.path().resource_dir()?.join("tools")),
                 executable,
@@ -281,6 +291,7 @@ fn main() {
                 paths,
                 session: Mutex::new(Session::default()),
             });
+            updates::setup(app.handle());
             use tauri::menu::{Menu, MenuItem};
             let show = MenuItem::with_id(app, "show", "Open YTLR", true, None::<&str>)?;
             let quit =
@@ -314,14 +325,17 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event
-                && window
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.state::<updates::AppUpdates>().installing() {
+                    api.prevent_close();
+                } else if window
                     .state::<Bridge>()
                     .close_to_tray
                     .load(Ordering::Relaxed)
-            {
-                api.prevent_close();
-                let _ = window.hide();
+                {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -333,10 +347,24 @@ fn main() {
             save_remote,
             delete_remote,
             connect_remote,
-            connection
+            connection,
+            updates::update_status,
+            updates::set_update_preferences,
+            updates::check_app_update,
+            updates::install_app_update,
+            updates::open_update_releases
         ])
-        .run(tauri::generate_context!())
-        .expect("데스크톱 앱 실행 실패");
+        .build(tauri::generate_context!())
+        .expect("데스크톱 앱 실행 실패")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event
+                && app
+                    .try_state::<updates::AppUpdates>()
+                    .is_some_and(|state| state.installing())
+            {
+                api.prevent_exit();
+            }
+        });
 }
 
 #[cfg(test)]

@@ -227,6 +227,10 @@ try {
     live_from_start: true,
     recording_options: { audio_only: false, max_height: 720 },
     stop_at: new Date(Date.now() + 3600000).toISOString(),
+    schedule: {
+      start_at: new Date(Date.now() + 1800000).toISOString(),
+      duration_minutes: 120,
+    },
   };
   const initial = await api(a, "/jobs", "POST", request);
   await Promise.all(
@@ -247,6 +251,11 @@ try {
   assert.equal(target[0].replica, null, "no forwarding loop");
   assert.deepEqual(target[0].recording_options, request.recording_options);
   assert.equal(Date.parse(target[0].stop_at), Date.parse(request.stop_at));
+  assert.equal(
+    Date.parse(target[0].schedule.start_at),
+    Date.parse(request.schedule.start_at),
+  );
+  assert.equal(target[0].schedule.duration_minutes, 120);
   const changedStop = new Date(Date.now() + 7200000).toISOString();
   await api(a, `/jobs/${initial.id}/schedule`, "PUT", { stop_at: changedStop });
   await until(
@@ -254,6 +263,14 @@ try {
       Date.parse((await api(b, "/snapshot")).jobs[0].stop_at) ===
       Date.parse(changedStop),
     "updated replica deadline",
+  );
+  await api(a, `/jobs/${initial.id}/start-schedule`, "PUT", {
+    start_at: null,
+    duration_minutes: 120,
+  });
+  await until(
+    async () => (await api(b, "/snapshot")).jobs[0].schedule.start_at === null,
+    "updated replica start schedule",
   );
   for (const data of [a, b]) {
     const snap = await api(data, "/snapshot");

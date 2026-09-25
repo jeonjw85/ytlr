@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 let target = "local";
+export function scopedApi() {
+  const expectedTarget = target;
+  return <T>(path: string, method = "GET", body?: unknown): Promise<T> =>
+    invoke<T>("api", { path, method, body: body ?? null, expectedTarget });
+}
 
 export async function api<T>(
   path: string,

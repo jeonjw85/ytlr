@@ -7,6 +7,18 @@ import { join, resolve } from "node:path";
 let daemon: ChildProcess;
 let endpoint: { port: number; token: string };
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const noUpdates = {
+  current_version: "0.2.3",
+  available: false,
+  auto_check: false,
+  phase: "idle",
+  version: null,
+  notes: null,
+  checked_at: null,
+  downloaded: 0,
+  total: null,
+  message: "개발 빌드에서는 자동 업데이트를 사용하지 않습니다.",
+};
 
 test.beforeAll(async () => {
   const home = await mkdtemp(join(tmpdir(), "ytlr-ui-"));
@@ -67,6 +79,7 @@ test("GUI persists language and controls the real Rust service: create, deduplic
         nativeLanguages.push(args.language);
         return null;
       }
+      if (command === "update_status") return noUpdates;
       if (command === "list_remotes")
         return [
           {
@@ -150,6 +163,14 @@ test("GUI persists language and controls the real Rust service: create, deduplic
     .getByLabel("영상 URL")
     .fill("https://www.youtube.com/watch?v=abcdefghijk");
   await page.getByLabel("최대 화질").selectOption("720");
+  const start = new Date(Date.now() + 10 * 60000);
+  const localStart = new Date(
+    start.getTime() - start.getTimezoneOffset() * 60000,
+  )
+    .toISOString()
+    .slice(0, 16);
+  await page.getByLabel("시작 시각 (이 기기 시간대)").fill(localStart);
+  await page.getByLabel("실제 녹화 시작 후 최대 분").fill("10");
   await page.getByLabel("종료 예약", { exact: true }).selectOption("minutes");
   await page.getByLabel("종료까지 남은 분").fill("30");
   await page.getByRole("button", { name: "추가하기", exact: true }).click();
@@ -162,6 +183,7 @@ test("GUI persists language and controls the real Rust service: create, deduplic
   expect(Date.parse((await call("/snapshot")).jobs[0].stop_at)).toBeGreaterThan(
     Date.now(),
   );
+  expect((await call("/snapshot")).jobs[0].schedule.duration_minutes).toBe(10);
   await expect(page.getByText(/예약 종료까지/)).toBeVisible();
   await page
     .locator(".job-card")
@@ -174,6 +196,15 @@ test("GUI persists language and controls the real Rust service: create, deduplic
   await page.getByRole("button", { name: "예약 저장", exact: true }).click();
   await expect
     .poll(async () => (await call("/snapshot")).jobs[0].stop_at)
+    .toBeNull();
+  await page
+    .getByRole("button", { name: "시작 예약 변경", exact: true })
+    .click();
+  await page.getByLabel("시작 시각 (이 기기 시간대)").fill("");
+  await page.getByLabel("실제 녹화 시작 후 최대 분").fill("");
+  await page.getByRole("button", { name: "예약 저장", exact: true }).click();
+  await expect
+    .poll(async () => (await call("/snapshot")).jobs[0].schedule.start_at)
     .toBeNull();
   await page.keyboard.press("Escape");
   await expect(
@@ -190,7 +221,24 @@ test("GUI persists language and controls the real Rust service: create, deduplic
   await expect(page.locator(".job-card")).toHaveCount(0);
   await page.getByRole("button", { name: "보관함", exact: true }).click();
   await expect(page.locator(".library-row")).toHaveCount(1);
-  await expect(page.getByText("저장됨", { exact: true })).toBeVisible();
+  await expect(
+    page.locator(".library-row").getByText("저장됨", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "중요 녹화 보호", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "작업 삭제", exact: true }),
+  ).toBeDisabled();
+  await page.getByLabel("중요 녹화만", { exact: true }).check();
+  await expect(page.locator(".library-row")).toHaveCount(1);
+  await page.getByRole("button", { name: "보호 해제", exact: true }).click();
+  await expect(page.locator(".library-row")).toHaveCount(0);
+  await page.getByLabel("중요 녹화만", { exact: true }).uncheck();
+  await page.getByLabel("상태", { exact: true }).selectOption("failed");
+  await expect(page.locator(".library-row")).toHaveCount(0);
+  await page.getByLabel("상태", { exact: true }).selectOption("stopped");
+  await expect(page.locator(".library-row")).toHaveCount(1);
   await page.getByRole("button", { name: "채널", exact: true }).click();
   await page
     .getByRole("button", { name: "채널 추가", exact: true })
@@ -207,6 +255,18 @@ test("GUI persists language and controls the real Rust service: create, deduplic
   await page.getByRole("button", { name: "녹화 옵션", exact: true }).click();
   await page.getByLabel("녹화 모드").selectOption("video");
   await page.getByLabel("최대 화질").selectOption("480");
+  await page.getByLabel("포함 키워드 (한 줄에 하나)").fill("concert\n공연");
+  await page.getByLabel("제외 키워드 (한 줄에 하나)").fill("test");
+  await page.getByLabel("미리보기 방송 제목").fill("Concert TEST");
+  await page
+    .getByRole("button", { name: "규칙 미리보기", exact: true })
+    .click();
+  await expect(
+    page.getByText("녹화 제외 · 제외 키워드 일치", { exact: true }),
+  ).toBeVisible();
+  await page.getByLabel("주간 반복 녹화 시간대").check();
+  await page.getByLabel("반복 시작").fill("23:00");
+  await page.getByLabel("반복 종료").fill("01:00");
   await page.getByRole("button", { name: "저장", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect((await call("/snapshot")).channels[0].recording_options).toEqual({
@@ -214,11 +274,20 @@ test("GUI persists language and controls the real Rust service: create, deduplic
     max_height: 480,
   });
   const toggle = page.getByRole("switch", { name: "내 채널 자동 녹화" });
+  expect((await call("/snapshot")).channels[0].rules.window.start_minute).toBe(
+    1380,
+  );
   await expect(toggle).toHaveAttribute("aria-checked", "true");
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-checked", "false");
   await page.getByRole("button", { name: "설정", exact: true }).click();
   await page.getByLabel("동시 녹화 수").fill("3");
+  await page.getByLabel("검증된 분할 원본 정리 (일 후)").fill("7");
+  await page.getByLabel("녹화 전체 삭제 (일 후)").fill("90");
+  await page
+    .getByRole("button", { name: "알림 대상 추가", exact: true })
+    .click();
+  await page.getByLabel("URL 환경변수").fill("YTLR_UI_WEBHOOK");
   // Changing UI language must not discard unsaved recording settings.
   await page.getByLabel("언어", { exact: true }).selectOption("en");
   await expect(page.getByLabel("Concurrent recordings")).toHaveValue("3");
@@ -231,6 +300,13 @@ test("GUI persists language and controls the real Rust service: create, deduplic
   await expect
     .poll(async () => (await call("/snapshot")).settings.max_recordings)
     .toBe(3);
+  expect((await call("/snapshot")).settings.automation.retention).toEqual({
+    cleanup_after_days: 7,
+    delete_after_days: 90,
+  });
+  expect(
+    (await call("/snapshot")).settings.automation.notifications[0].url_env,
+  ).toBe("YTLR_UI_WEBHOOK");
   expect(errors).toEqual([]);
   await page.getByLabel("연결 대상").selectOption("offline");
   await expect(page.getByLabel("연결 대상")).toHaveValue("offline");
@@ -301,12 +377,15 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
     Object.defineProperty(window, "Notification", { value: TestNotification });
   });
   const cleanupRequests: any[] = [];
+  const clipRequests: any[] = [];
+  const exportRequests: any[] = [];
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.exposeFunction(
     "nativeInvoke",
     async (command: string, args: any) => {
       if (command === "set_ui_language" || command === "open_job") return null;
+      if (command === "update_status") return noUpdates;
       if (command === "list_remotes") return [];
       if (command.includes("is_permission_granted")) return true;
       if (command.includes("notify")) {
@@ -316,6 +395,14 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
       if (command === "api") {
         if (args.path === "/snapshot") return snapshot;
         if (args.path.endsWith("/events")) return [];
+        if (args.path.endsWith("/clip")) {
+          clipRequests.push(args.body);
+          return { path: "/fixture/clip.mp4" };
+        }
+        if (args.path.endsWith("/export-wait")) {
+          exportRequests.push(args.body);
+          return { path: "/fixture/export.mp4" };
+        }
         if (args.path.endsWith("/bookmarks") && args.method === "POST") {
           job.bookmarks.push({
             id: "mark-1",
@@ -428,6 +515,22 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
     },
   ];
   await page
+    .getByLabel("Start bookmark", { exact: true })
+    .selectOption("mark-1");
+  await page.getByLabel("Seconds before", { exact: true }).fill("10");
+  await page.getByLabel("Seconds after", { exact: true }).fill("5");
+  await page.getByRole("button", { name: "Create clip", exact: true }).click();
+  await expect.poll(() => clipRequests.length).toBe(1);
+  expect(clipRequests[0]).toEqual({
+    bookmark_id: "mark-1",
+    end_bookmark_id: null,
+    before_seconds: 10,
+    after_seconds: 5,
+  });
+  await expect(
+    page.getByText("Export complete: /fixture/clip.mp4", { exact: true }),
+  ).toBeVisible();
+  await page
     .getByRole("button", { name: "Preview cleanup", exact: true })
     .click();
   await expect(page.getByText(/Results to keep/)).toBeVisible();
@@ -456,5 +559,23 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
     .getByRole("button", { name: "Delete bookmark", exact: true })
     .click();
   await expect.poll(() => job.bookmarks.length).toBe(0);
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Library", exact: true }).click();
+  await page.getByLabel(/Select all visible/).check();
+  await page
+    .getByRole("button", { name: "Export selected", exact: true })
+    .click();
+  await expect.poll(() => exportRequests.length).toBe(1);
+  await expect(
+    page.getByText("UI live fixture: Export complete (1)", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Preview selected cleanup", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Clean previewed files", exact: true })
+    .click();
+  await expect.poll(() => cleanupRequests.length).toBe(2);
+  expect(cleanupRequests[1]).toEqual({ plan_id: "plan-1", all: true });
   expect(errors).toEqual([]);
 });

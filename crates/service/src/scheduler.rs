@@ -75,10 +75,17 @@ pub async fn schedule(state: Arc<Service>) {
                         continue;
                     }
                     if state.installing.load(Ordering::SeqCst) { continue; }
+                    if job.schedule.start_at.as_deref().and_then(parse_rfc3339).is_some_and(|at| at > chrono::Utc::now()) { continue; }
                     if !matches!(job.state, JobState::Queued | JobState::Waiting | JobState::Reconnecting) || job.stop_requested { continue; }
                     if state.next_checks.lock().await.get(&job.id).is_some_and(|at| *at > Instant::now()) { continue; }
                     let mut active = state.active.lock().await;
-                    if state.installing.load(Ordering::SeqCst) { break; }
+                    if state.shutdown.is_cancelled() || state.installing.load(Ordering::SeqCst) { break; }
+                    let Ok(job) = state.store.job(&job.id) else { continue; };
+                    // A schedule/stop edit may have committed since the snapshot above.
+                    if !matches!(job.state, JobState::Queued | JobState::Waiting | JobState::Reconnecting)
+                        || job.stop_requested
+                        || job.schedule.start_at.as_deref().and_then(parse_rfc3339).is_some_and(|at| at > chrono::Utc::now())
+                        || job.stop_at.as_deref().and_then(parse_rfc3339).is_some_and(|at| at <= chrono::Utc::now()) { continue; }
                     if active.contains_key(&job.id) { continue; }
                     if active.len() >= settings.max_recordings {
                         let _ = state.store.update_job(&job.id, |j| { j.message = "동시 녹화 상한 도달 · 대기 중 앞부분이 누락될 수 있습니다.".into(); });
@@ -183,6 +190,18 @@ async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationTok
     let settings = state.store.settings()?;
     let started_at = now();
     let job = state.store.update_job(&job.id, |j| {
+        if j.started_at.is_none()
+            && let Some(minutes) = j.schedule.duration_minutes
+        {
+            let end = chrono::Utc::now() + chrono::Duration::minutes(minutes as i64);
+            if j.stop_at
+                .as_deref()
+                .and_then(parse_rfc3339)
+                .is_none_or(|stop| end < stop)
+            {
+                j.stop_at = Some(end.to_rfc3339());
+            }
+        }
         j.attempt += 1;
         j.state = JobState::Recording;
         j.message = "스트림 연결 중".into();
@@ -594,18 +613,63 @@ pub async fn monitor(state: Arc<Service>) {
                 Ok(urls) => {
                     channel.last_error = None;
                     for url in urls {
+                        // Re-read edits after the network scan, before applying any rule.
+                        let Some(current) = state.store.channels().ok().and_then(|cs| {
+                            cs.into_iter().find(|c| c.id == channel.id && c.enabled)
+                        }) else {
+                            break;
+                        };
+                        channel.rules = current.rules;
+                        channel.recording_options = current.recording_options;
+                        channel.live_from_start = current.live_from_start;
+                        channel.priority = current.priority;
+                        let info = tokio::select! { _ = state.shutdown.cancelled() => return, r = inspect(&state.tools, &url, &channel.recording_options, cookie_file.as_deref(), po_token.as_deref()) => r };
+                        let info = match info {
+                            Ok(info) => info,
+                            Err(e) => {
+                                channel.last_error = Some(redact(&e.to_string()));
+                                continue;
+                            }
+                        };
+                        let decision = channel.rules.evaluate(&info.title, chrono::Utc::now());
+                        if channel.decisions.last().is_none_or(|d| {
+                            d.title != decision.title
+                                || d.reason != decision.reason
+                                || d.window_start != decision.window_start
+                        }) {
+                            channel.decisions.push(decision.clone());
+                            if channel.decisions.len() > 20 {
+                                channel.decisions.remove(0);
+                            }
+                        }
+                        if !decision.allowed
+                            || !matches!(info.live_status.as_str(), "is_live" | "is_upcoming")
+                        {
+                            continue;
+                        }
+                        let key = format!(
+                            "{}:{}:{}",
+                            channel.id,
+                            url,
+                            decision.window_start.as_deref().unwrap_or("once")
+                        );
                         let request = RecordRequest {
-                            stop_at: None,
+                            schedule: RecordingSchedule {
+                                start_at: None,
+                                duration_minutes: channel.rules.duration_minutes,
+                            },
+                            stop_at: decision.stop_at,
                             url,
                             recording_options: channel.recording_options.clone(),
                             live_from_start: channel.live_from_start,
                             priority: channel.priority,
                         };
-                        if let Ok(job) =
-                            state
-                                .store
-                                .add_job(&request, Some(channel.id.clone()), true)
-                        {
+                        if let Ok(Some(job)) = state.store.add_window_job(
+                            &request,
+                            channel.id.clone(),
+                            &key,
+                            channel.rules.window.is_some(),
+                        ) {
                             state.fanout_job(&job);
                         }
                     }
@@ -620,6 +684,7 @@ pub async fn monitor(state: Arc<Service>) {
             {
                 current.last_checked_at = channel.last_checked_at;
                 current.last_error = channel.last_error;
+                current.decisions = channel.decisions;
                 let _ = state.store.save_channel(&current);
             }
         }

@@ -1,11 +1,13 @@
 {
   "name": "ytliverecord",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "packageManager": "pnpm@11.20.0",
   "scripts": {
     "dev": "node packaging/prepare.mjs --debug && pnpm --dir apps/desktop tauri dev",
     "build": "node packaging/prepare.mjs && pnpm --dir apps/desktop tauri build",
+    "build:release": "node packaging/updater.mjs build",
+    "test:updater": "node --test tests/packaging/updater.test.mjs",
     "check": "pnpm --dir apps/desktop check",
     "test": "pnpm --dir apps/desktop test",
     "test:integration": "node tests/integration/service.mjs",

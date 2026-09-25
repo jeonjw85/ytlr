@@ -13,7 +13,6 @@ import {
   ArrowUpRight,
   Check,
   CheckCircle2,
-  ChevronRight,
   Circle,
   Clock3,
   Download,
@@ -44,6 +43,16 @@ import {
 import { api, connectRemote, listRemotes, openJob, saveRemote } from "./api";
 import { useI18n, type Language } from "./i18n";
 import {
+  AutomationFields,
+  RuleFields,
+  StartFields,
+  StartSchedule,
+  cleanRules,
+} from "./Automation";
+import { Library } from "./Library";
+import { Clips } from "./Clips";
+import { AppUpdates } from "./AppUpdates";
+import {
   DeadlineFields,
   deadlineDraft,
   resolveDeadline,
@@ -54,6 +63,9 @@ import {
 import {
   bytes,
   defaultRecordingOptions,
+  defaultRules,
+  type ChannelRules,
+  type RecordingSchedule,
   duration,
   elapsed,
   isTerminal,
@@ -120,7 +132,9 @@ export default function App() {
         if (epoch !== connectionEpoch.current) return;
         setSnapshot(next);
         setConnectionError("");
-        const lowStorage = (next.storage ?? []).filter((disk) => disk.low_space);
+        const lowStorage = (next.storage ?? []).filter(
+          (disk) => disk.low_space,
+        );
         if (next.settings.notifications) {
           for (const disk of lowStorage) {
             if (!warnedStorage.current.has(disk.path)) {
@@ -182,7 +196,8 @@ export default function App() {
         previous.current = new Map(next.jobs.map((j) => [j.id, j.state]));
         initialized.current = true;
       } catch (error) {
-        if (epoch === connectionEpoch.current) setConnectionError(String(error));
+        if (epoch === connectionEpoch.current)
+          setConnectionError(String(error));
       } finally {
         if (epoch === connectionEpoch.current) fetching.current = false;
       }
@@ -380,6 +395,7 @@ export default function App() {
           </div>
         </header>
         <div className="content">
+          <AppUpdates settings={page === "settings"} />
           <div className="page-heading">
             <div>
               <h1>{t(pageInfo[page])}</h1>
@@ -710,71 +726,14 @@ export default function App() {
           )}
 
           {page === "library" && (
-            <>
-              <div className="section-bar">
-                <h2>
-                  {t("보관된 작업")}{" "}
-                  <span>{jobs.filter(isTerminal).length}</span>
-                </h2>
-                <SearchBox value={search} onChange={setSearch} />
-              </div>
-              {shown.length ? (
-                <div className="library-list">
-                  {shown.map((job) => (
-                    <div className="library-row" key={job.id}>
-                      <div className="file-icon">
-                        <FileVideo2 size={25} />
-                      </div>
-                      <div className="library-title">
-                        <h3>
-                          {job.title === "방송 정보 확인 대기"
-                            ? t(job.title)
-                            : job.title}
-                        </h3>
-                        <p>
-                          {job.channel || job.video_id} ·{" "}
-                          {new Date(job.created_at).toLocaleDateString(
-                            dateLocale,
-                          )}{" "}
-                          · {bytes(job.bytes)} ·{" "}
-                          <RecordingSummary options={job.recording_options} />
-                        </p>
-                        <span className="library-note">{t(job.message)}</span>
-                      </div>
-                      <Badge job={job} />
-                      <button
-                        className="icon-button"
-                        title={t("폴더 열기")}
-                        aria-label={t("폴더 열기")}
-                        onClick={() => safeOpen(job)}
-                      >
-                        <FolderOpen size={19} />
-                      </button>
-                      <button
-                        className="icon-button danger"
-                        title={t("작업 삭제")}
-                        aria-label={t("작업 삭제")}
-                        onClick={() => void deleteJob(job)}
-                      >
-                        <Trash2 size={17} />
-                      </button>
-                      <button
-                        className="button small"
-                        onClick={() => setDetail(job.id)}
-                      >
-                        {t("상세")}
-                        <ChevronRight size={14} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <Empty
-                  title={t("보관된 녹화가 없습니다")}
-                  text={t("완료되거나 중지된 작업이 여기 표시됩니다.")}
-                />
-              )}
-            </>
+            <Library
+              key={connection}
+              jobs={jobs}
+              onChanged={refresh}
+              onOpen={safeOpen}
+              onDetail={setDetail}
+              onDelete={deleteJob}
+            />
           )}
 
           {page === "settings" && <AppPreferences />}
@@ -837,7 +796,7 @@ export default function App() {
         <ChannelOptionsDialog
           channel={editingChannel}
           onClose={() => setEditingChannel(null)}
-          onSave={async (options, fromStart) => {
+          onSave={async (options, fromStart, rules) => {
             const current = snapshot?.channels.find(
               (channel) => channel.id === editingChannel.id,
             );
@@ -846,6 +805,7 @@ export default function App() {
               ...current,
               recording_options: options,
               live_from_start: fromStart,
+              rules,
             });
             setEditingChannel(null);
           }}
@@ -1050,6 +1010,15 @@ function JobCard({
           </button>
         </div>
       </div>
+      {job.schedule?.start_at && job.attempt === 0 && (
+        <p className="job-message">
+          {t("예약 시작까지 {time}", {
+            time: duration(
+              (new Date(job.schedule.start_at).getTime() - clock) / 1000,
+            ),
+          })}
+        </p>
+      )}
       {job.stop_at && (
         <p className="tip">
           {t("예약 종료까지 {time}", {
@@ -1222,6 +1191,7 @@ function ChannelOptionsDialog({
   onSave: (
     options: RecordingOptions,
     fromStart: boolean | null,
+    rules: ChannelRules,
   ) => Promise<void>;
 }) {
   const { t } = useI18n();
@@ -1229,6 +1199,7 @@ function ChannelOptionsDialog({
     channel.recording_options ?? defaultRecordingOptions,
   );
   const [fromStart, setFromStart] = useState(channel.live_from_start ?? null);
+  const [rules, setRules] = useState(channel.rules ?? defaultRules);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   return (
@@ -1239,7 +1210,7 @@ function ChannelOptionsDialog({
           setPending(true);
           setError("");
           try {
-            await onSave(options, fromStart);
+            await onSave(options, fromStart, cleanRules(rules));
           } catch (error) {
             setError(String(error));
           } finally {
@@ -1251,6 +1222,11 @@ function ChannelOptionsDialog({
           {channel.name} · {t("변경 사항은 새로 생성되는 녹화에 적용됩니다.")}
         </p>
         <RecordingFields options={options} onChange={setOptions} />
+        <RuleFields
+          value={rules}
+          onChange={setRules}
+          decisions={channel.decisions}
+        />
         <label className="field">
           {t("녹화 시작 지점")}
           <select
@@ -1301,6 +1277,10 @@ function AddDialog({
   const [start, setStart] = useState(fromStart);
   const [options, setOptions] = useState(defaultRecordingOptions);
   const [deadline, setDeadline] = useState(() => deadlineDraft());
+  const [schedule, setSchedule] = useState<RecordingSchedule>({
+    start_at: null,
+    duration_minutes: null,
+  });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   async function submit(e: FormEvent) {
@@ -1317,6 +1297,7 @@ function AddDialog({
               priority: 0,
               recording_options: options,
               stop_at: resolveDeadline(deadline),
+              schedule,
             }
           : {
               url,
@@ -1361,7 +1342,10 @@ function AddDialog({
         </label>
         <RecordingFields options={options} onChange={setOptions} />
         {kind === "record" && (
-          <DeadlineFields value={deadline} onChange={setDeadline} />
+          <>
+            <StartFields value={schedule} onChange={setSchedule} />
+            <DeadlineFields value={deadline} onChange={setDeadline} />
+          </>
         )}
         {kind === "channel" && (
           <label className="field">
@@ -1665,6 +1649,8 @@ function Details({
         </p>
       )}
       <JobSchedule key={`schedule-${job.id}`} job={job} onChanged={onChanged} />
+      <StartSchedule key={`start-${job.id}`} job={job} onChanged={onChanged} />
+      <Clips key={`clips-${job.id}`} job={job} onChanged={onChanged} />
       <JobBookmarks
         key={`bookmarks-${job.id}`}
         job={job}
@@ -1882,6 +1868,10 @@ function SettingsView({
   return (
     <div className="settings-content">
       <form onSubmit={submit}>
+        <AutomationFields
+          value={settings.automation}
+          onChange={(value) => update("automation", value)}
+        />
         <section className="settings-card">
           <div className="settings-heading">
             <HardDrive size={19} />

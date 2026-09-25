@@ -2,7 +2,9 @@ mod alerts;
 mod backup;
 pub mod client;
 mod http;
+mod notifications;
 mod replica;
+mod retention;
 mod scheduler;
 mod storage;
 pub mod tunnel;
@@ -146,6 +148,8 @@ pub async fn run(paths: AppPaths) -> Result<()> {
     let backup = tokio::spawn(backup::run(state.clone()));
     let storage = tokio::spawn(storage::run(state.clone()));
     let alerts = tokio::spawn(alerts::run(state.clone()));
+    let notifications = tokio::spawn(notifications::run(state.clone()));
+    let retention = tokio::spawn(retention::run(state.clone()));
     let checker = state.clone();
     let tool_checker = tokio::spawn(async move {
         loop {
@@ -186,6 +190,8 @@ pub async fn run(paths: AppPaths) -> Result<()> {
     let _ = backup.await;
     let _ = storage.await;
     let _ = alerts.await;
+    let _ = notifications.await;
+    let _ = retention.await;
     signal.abort();
     let _ = tool_checker.await;
     let _ = std::fs::remove_file(paths.endpoint_file());

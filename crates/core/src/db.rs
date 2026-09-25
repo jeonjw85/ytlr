@@ -18,6 +18,9 @@ impl Store {
             CREATE TABLE IF NOT EXISTS channels (id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL REFERENCES jobs(id), at TEXT NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS replica_requests (request_id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id));
+            CREATE TABLE IF NOT EXISTS automatic_runs (key TEXT PRIMARY KEY, job_id TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS notification_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, target TEXT NOT NULL, body TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, error TEXT);
+            CREATE TABLE IF NOT EXISTS maintenance_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, job_id TEXT NOT NULL, message TEXT NOT NULL);
             PRAGMA user_version=1;")?;
         conn.execute(
             "INSERT OR IGNORE INTO settings VALUES(1, ?)",
@@ -27,7 +30,7 @@ impl Store {
             conn: Mutex::new(conn),
         })
     }
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
             .map_err(|_| anyhow::anyhow!("상태 DB 잠금 오류"))
@@ -82,7 +85,30 @@ impl Store {
         channel_id: Option<String>,
         automatic: bool,
     ) -> Result<RecordingJob> {
-        self.add_job_keyed(request, channel_id, automatic, None)
+        self.add_job_keyed(request, channel_id, automatic, None, None)
+    }
+    pub fn add_window_job(
+        &self,
+        request: &RecordRequest,
+        channel_id: String,
+        key: &str,
+        repeat: bool,
+    ) -> Result<Option<RecordingJob>> {
+        // The durable occurrence ledger also survives retention deletion.
+        if self
+            .lock()?
+            .query_row(
+                "SELECT 1 FROM automatic_runs WHERE key=?",
+                [key],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        self.add_job_keyed(request, Some(channel_id), !repeat, None, Some(key))
+            .map(Some)
     }
     pub fn add_replica_job(&self, request: &RecordRequest, key: &str) -> Result<RecordingJob> {
         if key.is_empty()
@@ -93,7 +119,7 @@ impl Store {
         {
             bail!("잘못된 이중 녹화 요청 ID");
         }
-        self.add_job_keyed(request, None, false, Some(key))
+        self.add_job_keyed(request, None, false, Some(key), None)
     }
     fn add_job_keyed(
         &self,
@@ -101,13 +127,29 @@ impl Store {
         channel_id: Option<String>,
         automatic: bool,
         key: Option<&str>,
+        occurrence: Option<&str>,
     ) -> Result<RecordingJob> {
         request.recording_options.validate()?;
         let stop_at = normalize_stop_at(request.stop_at.as_deref())?;
+        request.schedule.validate(stop_at.as_deref())?;
+        let mut schedule = request.schedule.clone();
+        schedule.start_at = normalize_stop_at(schedule.start_at.as_deref())?;
         let (url, video_id) = video_url(&request.url)?;
         let settings = self.settings()?;
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
+        if let Some(key) = occurrence
+            && tx
+                .query_row(
+                    "SELECT 1 FROM automatic_runs WHERE key=?",
+                    [key],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+        {
+            bail!("이미 처리한 반복 예약입니다.");
+        }
         if let Some(key) = key {
             let existing: Option<String> = tx.query_row("SELECT jobs.body FROM jobs JOIN replica_requests ON jobs.id=replica_requests.job_id WHERE request_id=?", [key], |r| r.get(0)).optional()?;
             if let Some(raw) = existing {
@@ -126,6 +168,21 @@ impl Store {
             }
         }
         if let Some(job) = matching {
+            if let Some(key) = occurrence
+                && job.state.terminal()
+            {
+                // A once-only channel upgraded from an older version may already have
+                // this recording without an occurrence ledger entry.
+                tx.execute(
+                    "INSERT INTO automatic_runs VALUES(?,?)",
+                    params![key, job.id],
+                )?;
+                tx.commit()?;
+                return Ok(job);
+            }
+            if occurrence.is_some() {
+                bail!("같은 방송의 이전 작업이 아직 실행 중입니다.");
+            }
             let requested_live_from_start =
                 request.live_from_start.unwrap_or(settings.live_from_start);
             if !automatic
@@ -137,6 +194,9 @@ impl Store {
                 bail!(
                     "같은 방송의 진행 중인 작업이 다른 녹화 옵션으로 이미 존재합니다. 기존 작업을 중지한 뒤 다시 추가하세요."
                 );
+            }
+            if !automatic && job.schedule != schedule {
+                bail!("같은 방송의 진행 중인 시작 예약이 다릅니다.");
             }
             if let Some(key) = key {
                 tx.execute(
@@ -150,6 +210,9 @@ impl Store {
         let id = uuid::Uuid::new_v4().to_string();
         let at = now();
         let job = RecordingJob {
+            schedule,
+            protected: false,
+            finished_at: None,
             stop_at,
             bookmarks: vec![],
             alerts: vec![],
@@ -189,6 +252,12 @@ impl Store {
             "INSERT INTO jobs VALUES(?,?,?)",
             params![job.id, job.video_id, serde_json::to_string(&job)?],
         )?;
+        if let Some(key) = occurrence {
+            tx.execute(
+                "INSERT INTO automatic_runs VALUES(?,?)",
+                params![key, job.id],
+            )?;
+        }
         if let Some(key) = key {
             tx.execute(
                 "INSERT INTO replica_requests VALUES(?,?)",
@@ -220,6 +289,13 @@ impl Store {
         let raw: String = tx.query_row("SELECT body FROM jobs WHERE id=?", [id], |r| r.get(0))?;
         let mut job: RecordingJob = serde_json::from_str(&raw)?;
         change(&mut job)?;
+        if job.state.terminal() {
+            if job.finished_at.is_none() {
+                job.finished_at = Some(now());
+            }
+        } else {
+            job.finished_at = None;
+        }
         job.updated_at = now();
         tx.execute(
             "UPDATE jobs SET body=? WHERE id=?",
@@ -236,6 +312,7 @@ impl Store {
                 bail!("종료 중이거나 끝난 작업의 예약은 변경할 수 없습니다.");
             }
             job.stop_at = stop_at;
+            job.schedule.validate(job.stop_at.as_deref())?;
             Ok(())
         })
     }
@@ -331,10 +408,38 @@ impl Store {
         Ok(())
     }
     pub fn event(&self, id: &str, kind: &str, message: &str) -> Result<()> {
-        self.lock()?.execute(
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let at = now();
+        tx.execute(
             "INSERT INTO events(job_id, at, kind, message) VALUES(?,?,?,?)",
-            params![id, now(), kind, redact(message)],
+            params![id, at, kind, redact(message)],
         )?;
+        if matches!(
+            kind,
+            "recording"
+                | "finished"
+                | "error"
+                | "alert_opened"
+                | "alert_resolved"
+                | "storage_warning"
+                | "replica_error"
+                | "cleanup_error"
+        ) {
+            let raw: String =
+                tx.query_row("SELECT body FROM settings WHERE id=1", [], |r| r.get(0))?;
+            let settings: Settings = serde_json::from_str(&raw)?;
+            let body = serde_json::to_string(
+                &serde_json::json!({"job_id":id,"kind":kind,"at":at,"message":redact(message)}),
+            )?;
+            for target in settings.automation.notifications {
+                tx.execute(
+                    "INSERT INTO notification_outbox(target,body,next_at) VALUES(?,?,?)",
+                    params![target.id(), body, at],
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
     pub fn events(&self, id: &str) -> Result<Vec<JobEvent>> {
@@ -368,6 +473,8 @@ impl Store {
             return Ok(channel);
         }
         let channel = Channel {
+            rules: ChannelRules::default(),
+            decisions: vec![],
             recording_options: req.recording_options.clone(),
             live_from_start: req.live_from_start,
             id: uuid::Uuid::new_v4().to_string(),
@@ -389,6 +496,7 @@ impl Store {
         Ok(channel)
     }
     pub fn save_channel(&self, channel: &Channel) -> Result<()> {
+        channel.rules.validate()?;
         channel.recording_options.validate()?;
         let count = self.lock()?.execute(
             "UPDATE channels SET body=? WHERE id=?",
@@ -407,6 +515,10 @@ impl Store {
     pub fn recover_interrupted(&self) -> Result<usize> {
         let mut count = 0;
         for job in self.jobs()? {
+            if job.state.terminal() && job.finished_at.is_none() {
+                // Legacy records lack an end timestamp; use the last persisted update.
+                self.update_job(&job.id, |j| j.finished_at = Some(job.updated_at.clone()))?;
+            }
             if job
                 .gaps
                 .iter()
@@ -552,6 +664,7 @@ mod tests {
         let job = db
             .add_job(
                 &RecordRequest {
+                    schedule: RecordingSchedule::default(),
                     stop_at: None,
                     url: "https://youtu.be/abcdefghijk".into(),
                     live_from_start: channel.live_from_start,
@@ -590,6 +703,7 @@ mod tests {
         let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
         let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
         let req = RecordRequest {
+            schedule: RecordingSchedule::default(),
             stop_at: None,
             recording_options: RecordingOptions::default(),
             url: "https://youtu.be/abcdefghijk".into(),
@@ -626,6 +740,7 @@ mod tests {
         let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
         let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
         let req = RecordRequest {
+            schedule: RecordingSchedule::default(),
             stop_at: None,
             recording_options: RecordingOptions::default(),
             url: "https://youtu.be/abcdefghijk".into(),

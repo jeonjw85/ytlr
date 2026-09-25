@@ -2,6 +2,10 @@
 import { describe, expect, it } from "vitest";
 import appSource from "./App.tsx?raw";
 import jobToolsSource from "./JobTools.tsx?raw";
+import automationSource from "./Automation.tsx?raw";
+import librarySource from "./Library.tsx?raw";
+import clipsSource from "./Clips.tsx?raw";
+import updatesSource from "./AppUpdates.tsx?raw";
 import ts from "typescript";
 import { translate } from "./i18n";
 import { english } from "./locales/en";
@@ -44,6 +48,22 @@ describe("UI translations", () => {
       ts.forEachChild(node, visit);
     };
     visit(source);
+    for (const text of [
+      automationSource,
+      librarySource,
+      clipsSource,
+      updatesSource,
+    ]) {
+      visit(
+        ts.createSourceFile(
+          "Feature.tsx",
+          text,
+          ts.ScriptTarget.Latest,
+          true,
+          ts.ScriptKind.TSX,
+        ),
+      );
+    }
     visit(
       ts.createSourceFile(
         "JobTools.tsx",

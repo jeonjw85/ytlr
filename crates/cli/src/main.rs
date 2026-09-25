@@ -82,6 +82,12 @@ enum Action {
     /// 라이브 URL 녹화 또는 예약 방송 대기
     Record {
         url: String,
+        /// Absolute start time (RFC3339 including timezone).
+        #[arg(long)]
+        start_at: Option<String>,
+        /// Maximum minutes after actual recording begins.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=525600))]
+        duration_minutes: Option<u32>,
         #[command(flatten)]
         deadline: DeadlineArgs,
         #[command(flatten)]
@@ -116,6 +122,66 @@ enum Action {
     },
     Events {
         id: String,
+    },
+    /// Replace the start schedule of a waiting job. Omit options to clear.
+    StartSchedule {
+        id: String,
+        #[arg(long)]
+        start_at: Option<String>,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=525600))]
+        duration_minutes: Option<u32>,
+    },
+    /// Protect a recording from manual and automatic cleanup/deletion.
+    Protect {
+        id: String,
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Export a bookmark range without re-encoding (approximate keyframe boundaries).
+    Clip {
+        id: String,
+        bookmark_id: String,
+        #[arg(long)]
+        end_bookmark: Option<String>,
+        #[arg(long, default_value_t = 30.0, conflicts_with = "end_bookmark")]
+        before: f64,
+        #[arg(long, default_value_t = 30.0, conflicts_with = "end_bookmark")]
+        after: f64,
+    },
+    /// Show automation settings or replace them from a local JSON file.
+    Automation {
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Show durable notification deliveries, or retry one by its numeric ID.
+    Notifications {
+        #[arg(long)]
+        retry: Option<i64>,
+    },
+    /// Show automatic retention/cleanup history, including deleted jobs.
+    Maintenance,
+    /// Filter archived recordings and optionally export all their outputs.
+    Library {
+        #[arg(long, default_value = "")]
+        search: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, value_parser = ["completed", "partial", "stopped", "failed"])]
+        state: Option<String>,
+        /// Inclusive RFC3339 creation time.
+        #[arg(long)]
+        from: Option<String>,
+        /// Exclusive RFC3339 creation time.
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long)]
+        protected: bool,
+        #[arg(long, default_value = "newest", value_parser = ["newest", "oldest", "size", "title"])]
+        sort: String,
+        #[arg(long, conflicts_with = "cleanup_preview")]
+        export: bool,
+        #[arg(long)]
+        cleanup_preview: bool,
     },
     /// Change or cancel the stop deadline of an unfinished job.
     Schedule {
@@ -193,6 +259,16 @@ enum Action {
 }
 #[derive(Subcommand)]
 enum ChannelAction {
+    /// Replace rules from JSON, or preview current/new rules without saving.
+    Rules {
+        id: String,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        preview_title: Option<String>,
+        #[arg(long, requires = "preview_title")]
+        at: Option<String>,
+    },
     Add {
         url: String,
         #[arg(long, default_value = "")]
@@ -436,6 +512,8 @@ async fn execute() -> Result<()> {
         Action::Start => println!("녹화 서비스 실행 중"),
         Action::Record {
             url,
+            start_at,
+            duration_minutes,
             deadline,
             capture,
             priority,
@@ -444,6 +522,10 @@ async fn execute() -> Result<()> {
                 .post::<RecordingJob>(
                     "/jobs",
                     &RecordRequest {
+                        schedule: RecordingSchedule {
+                            start_at,
+                            duration_minutes,
+                        },
                         stop_at: deadline.resolve()?,
                         url,
                         recording_options: capture.recording_options(),
@@ -530,6 +612,148 @@ async fn execute() -> Result<()> {
         )?,
         Action::Events { id } => {
             print_json(&client.get::<Value>(&format!("/jobs/{id}/events")).await?)?
+        }
+        Action::StartSchedule {
+            id,
+            start_at,
+            duration_minutes,
+        } => print_json(
+            &client
+                .request::<Value>(
+                    reqwest::Method::PUT,
+                    &format!("/jobs/{id}/start-schedule"),
+                    Some(&RecordingSchedule {
+                        start_at,
+                        duration_minutes,
+                    }),
+                )
+                .await?,
+        )?,
+        Action::Protect { id, clear } => print_json(
+            &client
+                .request::<Value>(
+                    reqwest::Method::PUT,
+                    &format!("/jobs/{id}/protect"),
+                    Some(&json!({"protected":!clear})),
+                )
+                .await?,
+        )?,
+        Action::Clip {
+            id,
+            bookmark_id,
+            end_bookmark,
+            before,
+            after,
+        } => print_json(
+            &client
+                .post::<Value>(
+                    &format!("/jobs/{id}/clip"),
+                    &ClipRequest {
+                        bookmark_id,
+                        end_bookmark_id: end_bookmark,
+                        before_seconds: before,
+                        after_seconds: after,
+                    },
+                )
+                .await?,
+        )?,
+        Action::Automation { file } => {
+            let mut settings = client.get::<Snapshot>("/snapshot").await?.settings;
+            if let Some(file) = file {
+                settings.automation = serde_json::from_slice(&std::fs::read(file)?)?;
+                settings = client
+                    .request(reqwest::Method::PUT, "/settings", Some(&settings))
+                    .await?;
+            }
+            print_json(&settings.automation)?;
+        }
+        Action::Notifications { retry } => {
+            if let Some(id) = retry {
+                let _: Value = client
+                    .post(&format!("/notifications/{id}/retry"), &json!({}))
+                    .await?;
+            }
+            print_json(&client.get::<Value>("/notifications").await?)?;
+        }
+        Action::Maintenance => print_json(&client.get::<Value>("/maintenance").await?)?,
+        Action::Library {
+            search,
+            channel,
+            state,
+            from,
+            until,
+            protected,
+            sort,
+            export,
+            cleanup_preview,
+        } => {
+            let from = from
+                .map(|s| parse_rfc3339(&s).context("--from 시각 형식 오류"))
+                .transpose()?;
+            let until = until
+                .map(|s| parse_rfc3339(&s).context("--until 시각 형식 오류"))
+                .transpose()?;
+            let mut jobs: Vec<_> = client
+                .get::<Snapshot>("/snapshot")
+                .await?
+                .jobs
+                .into_iter()
+                .filter(|j| {
+                    j.state.terminal()
+                        && format!("{} {}", j.title, j.channel)
+                            .to_lowercase()
+                            .contains(&search.to_lowercase())
+                        && channel.as_ref().is_none_or(|c| &j.channel == c)
+                        && state.as_ref().is_none_or(|s| {
+                            serde_json::to_value(&j.state)
+                                .ok()
+                                .and_then(|v| v.as_str().map(str::to_owned))
+                                .as_ref()
+                                == Some(s)
+                        })
+                        && (!protected || j.protected)
+                        && from
+                            .is_none_or(|at| parse_rfc3339(&j.created_at).is_some_and(|t| t >= at))
+                        && until
+                            .is_none_or(|at| parse_rfc3339(&j.created_at).is_some_and(|t| t < at))
+                })
+                .collect();
+            jobs.sort_by(|a, b| match sort.as_str() {
+                "size" => b.bytes.cmp(&a.bytes),
+                "title" => a.title.cmp(&b.title),
+                "oldest" => a.created_at.cmp(&b.created_at),
+                _ => b.created_at.cmp(&a.created_at),
+            });
+            if export || cleanup_preview {
+                let mut results = vec![];
+                for job in jobs {
+                    if cleanup_preview {
+                        let result = client
+                            .post::<Value>(&format!("/jobs/{}/cleanup/preview", job.id), &json!({}))
+                            .await;
+                        results.push(json!({"job_id":job.id,"result":result.as_ref().ok(),"error":result.err().map(|e|e.to_string())}));
+                    } else {
+                        if job.outputs.is_empty() {
+                            results.push(json!({"job_id":job.id,"error":"결과 파일이 없습니다."}));
+                        }
+                        for index in 0..job.outputs.len() {
+                            let result = client
+                                .post::<Value>(
+                                    &format!("/jobs/{}/export-wait", job.id),
+                                    &json!({"index":index}),
+                                )
+                                .await;
+                            results.push(json!({"job_id":job.id,"index":index,"result":result.as_ref().ok(),"error":result.err().map(|e|e.to_string())}));
+                        }
+                    }
+                }
+                print_json(&results)?;
+                if results.iter().any(|r| !r["error"].is_null()) {
+                    bail!("일부 작업 실패: 결과를 확인하세요.");
+                }
+            } else {
+                print_json(&jobs)?;
+            }
         }
         Action::Schedule {
             id,
@@ -623,6 +847,48 @@ async fn execute() -> Result<()> {
             }
         }
         Action::Channel { action } => match action {
+            ChannelAction::Rules {
+                id,
+                file,
+                preview_title,
+                at,
+            } => {
+                let channel = client
+                    .get::<Snapshot>("/snapshot")
+                    .await?
+                    .channels
+                    .into_iter()
+                    .find(|c| c.id == id)
+                    .context("채널을 찾을 수 없습니다.")?;
+                let supplied = file.is_some();
+                let rules: ChannelRules = if let Some(file) = file {
+                    serde_json::from_slice(&std::fs::read(file)?)?
+                } else {
+                    channel.rules
+                };
+                if let Some(title) = preview_title {
+                    print_json(
+                        &client
+                            .post::<Value>(
+                                "/rules/preview",
+                                &json!({"rules":rules,"title":title,"at":at}),
+                            )
+                            .await?,
+                    )?;
+                } else if supplied {
+                    print_json(
+                        &client
+                            .request::<Value>(
+                                reqwest::Method::PUT,
+                                &format!("/channels/{id}"),
+                                Some(&json!({"rules":rules})),
+                            )
+                            .await?,
+                    )?;
+                } else {
+                    print_json(&json!({"rules":rules,"decisions":channel.decisions}))?;
+                }
+            }
             ChannelAction::Add { url, name, capture } => print_json(
                 &client
                     .post::<Channel>(
@@ -797,4 +1063,62 @@ async fn execute() -> Result<()> {
         } => unreachable!(),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn automation_commands_and_conflicts_parse() {
+        Args::command().debug_assert();
+        assert!(
+            Args::try_parse_from([
+                "ytlr",
+                "record",
+                "https://youtu.be/abcdefghijk",
+                "--start-at",
+                "2030-01-01T00:00:00Z",
+                "--duration-minutes",
+                "60"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Args::try_parse_from(["ytlr", "clip", "job", "start", "--end-bookmark", "end"]).is_ok()
+        );
+        assert!(
+            Args::try_parse_from([
+                "ytlr",
+                "clip",
+                "job",
+                "start",
+                "--end-bookmark",
+                "end",
+                "--before",
+                "10"
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from(["ytlr", "library", "--export", "--cleanup-preview"]).is_err()
+        );
+        assert!(
+            Args::try_parse_from(["ytlr", "record", "url", "--duration-minutes", "0"]).is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "ytlr",
+                "channel",
+                "rules",
+                "id",
+                "--preview-title",
+                "concert",
+                "--at",
+                "2030-01-01T00:00:00Z"
+            ])
+            .is_ok()
+        );
+    }
 }

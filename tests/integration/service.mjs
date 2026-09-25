@@ -84,7 +84,22 @@ assert.equal(
   0,
 );
 const audioSource = await readFile(join(home, "sample.mka"));
+const notifications = [];
+let rejectNotification = true;
 const server = createServer((req, res) => {
+  if (req.url === "/notify") {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      notifications.push(JSON.parse(body));
+      res.writeHead(rejectNotification ? 503 : 200);
+      rejectNotification = false;
+      res.end("{}");
+    });
+    return;
+  }
   const source = req.url === "/sample.mka" ? audioSource : mediaSource;
   const match = /bytes=(\d+)-(\d*)/.exec(req.headers.range ?? "");
   const start = match ? Number(match[1]) : 0,
@@ -114,6 +129,7 @@ const env = {
   }).stdout.trim(),
   YTLR_FIXTURE_MEDIA: `http://127.0.0.1:${server.address().port}/sample.mp4`,
   YTLR_FIXTURE_AUDIO: `http://127.0.0.1:${server.address().port}/sample.mka`,
+  YTLR_TEST_WEBHOOK_URL: `http://127.0.0.1:${server.address().port}/notify`,
 };
 let daemon;
 let endpoint;
@@ -195,7 +211,52 @@ try {
     backup_root: backupRoot,
     cookies_path: cookieFile,
     po_token_path: tokenFile,
+    automation: {
+      notifications: [
+        {
+          id: "integration",
+          kind: "webhook",
+          url_env: "YTLR_TEST_WEBHOOK_URL",
+        },
+      ],
+      retention: {},
+    },
   });
+  const scheduled = await request("/jobs", "POST", {
+    url: "https://youtu.be/starttime01",
+    schedule: {
+      start_at: new Date(Date.now() + 3600000).toISOString(),
+      duration_minutes: 5,
+    },
+  });
+  await sleep(2500);
+  assert.equal(
+    (await request("/snapshot")).jobs.find((j) => j.id === scheduled.id)
+      .attempt,
+    0,
+    "start schedule must hold queue without occupying a slot",
+  );
+  await request(`/jobs/${scheduled.id}/start-schedule`, "PUT", {
+    start_at: new Date(Date.now() - 1000).toISOString(),
+    duration_minutes: 5,
+  });
+  await until(async () => {
+    const j = (await request("/snapshot")).jobs.find(
+      (j) => j.id === scheduled.id,
+    );
+    return (
+      j.last_media_at &&
+      j.stop_at &&
+      Date.parse(j.stop_at) - Date.parse(j.started_at) >= 299000
+    );
+  }, "scheduled start and duration deadline");
+  await request(`/jobs/${scheduled.id}/stop`, "POST", {});
+  await until(
+    async () =>
+      (await request("/snapshot")).jobs.find((j) => j.id === scheduled.id)
+        .state === "stopped",
+    "scheduled fixture stopped",
+  );
   const first = await request("/jobs", "POST", {
     url: "https://youtu.be/abcdefghijk",
     live_from_start: true,
@@ -217,6 +278,15 @@ try {
     const s = await request("/snapshot");
     return s.jobs.find((j) => j.id === first.id)?.last_media_at;
   }, "native progress");
+  await assert.rejects(
+    () => request("/shutdown-idle", "POST", {}),
+    /녹화 또는 파일 처리/,
+  );
+  assert.equal(
+    (await request("/health")).ok,
+    true,
+    "an update must not stop an active recorder",
+  );
   const marked = await request(`/jobs/${first.id}/bookmarks`, "POST", {
     title: "First marker",
     note: "Before restart",
@@ -299,6 +369,20 @@ try {
     90,
   );
   const events = await request(`/jobs/${first.id}/events`);
+  await until(
+    async () =>
+      (await request("/notifications")).some(
+        (d) => d.delivered && d.attempts >= 2,
+      ),
+    "webhook persistent retry succeeds after HTTP 503",
+  );
+  assert(notifications.length >= 2);
+  assert(
+    !JSON.stringify(await request("/notifications")).includes(
+      env.YTLR_TEST_WEBHOOK_URL,
+    ),
+    "notification diagnostics omit endpoint credentials",
+  );
   assert(!JSON.stringify(events).includes("TEST_COOKIE_SECRET"));
   assert(!JSON.stringify(events).includes("TEST_PO_TOKEN_abcdefghijklmnop"));
   assert.equal(
@@ -630,6 +714,26 @@ try {
     "low disk early warning",
   );
   assert(low.free_bytes > 0 && low.total_bytes >= low.free_bytes);
+  const updateWaiting = await request("/jobs", "POST", {
+    url: "https://youtu.be/updatewait1",
+    schedule: { start_at: new Date(Date.now() + 3600000).toISOString() },
+  });
+  await until(
+    () => request("/shutdown-idle", "POST", {}),
+    "idle shutdown for app update",
+  );
+  await until(
+    async () => daemon.exitCode !== null,
+    "old sidecar fully exits before update",
+  );
+  await start();
+  const resumed = (await request("/snapshot")).jobs.find(
+    (j) => j.id === updateWaiting.id,
+  );
+  assert.equal(resumed.attempt, 0);
+  assert.equal(resumed.state, "queued");
+  assert.equal(resumed.schedule.start_at, updateWaiting.schedule.start_at);
+  await request(`/jobs/${updateWaiting.id}/stop`, "POST", {});
   console.log(
     "PASS: authenticated IPC, deduplication, concurrency, stop timers and restart expiry, bookmarks, SIGKILL recovery, orphan cleanup, video/audio segmentation and export, verified selective cleanup, alert deduplication/recovery, channel defaults and scheduled waiting",
   );

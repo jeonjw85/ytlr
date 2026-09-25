@@ -145,6 +145,9 @@ mod tests {
 
     fn job() -> RecordingJob {
         RecordingJob {
+            schedule: crate::RecordingSchedule::default(),
+            protected: false,
+            finished_at: None,
             stop_at: None,
             bookmarks: vec![],
             alerts: vec![],

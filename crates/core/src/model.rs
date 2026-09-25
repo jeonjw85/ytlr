@@ -39,6 +39,8 @@ impl JobState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub automation: crate::AutomationSettings,
     pub storage_root: PathBuf,
     pub max_recordings: usize,
     pub scan_interval_secs: u64,
@@ -64,6 +66,7 @@ pub struct Settings {
 
 impl Settings {
     pub fn validate(&self) -> Result<()> {
+        self.automation.validate()?;
         if !self.storage_root.is_absolute() {
             bail!("저장 경로는 절대 경로여야 합니다.");
         }
@@ -149,6 +152,12 @@ impl RecordingOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingJob {
     #[serde(default)]
+    pub schedule: crate::RecordingSchedule,
+    #[serde(default)]
+    pub protected: bool,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+    #[serde(default)]
     pub stop_at: Option<String>,
     #[serde(default)]
     pub bookmarks: Vec<Bookmark>,
@@ -223,6 +232,10 @@ pub struct MediaOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
     #[serde(default)]
+    pub rules: crate::ChannelRules,
+    #[serde(default)]
+    pub decisions: Vec<crate::RuleDecision>,
+    #[serde(default)]
     pub recording_options: RecordingOptions,
     #[serde(default)]
     pub live_from_start: Option<bool>,
@@ -246,6 +259,8 @@ pub struct JobEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordRequest {
+    #[serde(default)]
+    pub schedule: crate::RecordingSchedule,
     #[serde(default)]
     pub stop_at: Option<String>,
     #[serde(default)]

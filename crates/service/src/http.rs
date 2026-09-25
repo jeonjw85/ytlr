@@ -48,6 +48,14 @@ pub fn router(state: Arc<Service>) -> Router {
         .route("/jobs/{id}/export", post(export))
         .route("/jobs/{id}/events", get(events))
         .route("/jobs/{id}/schedule", put(schedule))
+        .route("/jobs/{id}/start-schedule", put(start_schedule))
+        .route("/jobs/{id}/protect", put(protect))
+        .route("/jobs/{id}/clip", post(clip))
+        .route("/jobs/{id}/export-wait", post(export_wait))
+        .route("/rules/preview", post(rule_preview))
+        .route("/notifications", get(notification_status))
+        .route("/notifications/{id}/retry", post(notification_retry))
+        .route("/maintenance", get(maintenance_status))
         .route("/jobs/{id}/bookmarks", post(bookmark_add))
         .route(
             "/jobs/{id}/bookmarks/{bookmark_id}",
@@ -66,6 +74,7 @@ pub fn router(state: Arc<Service>) -> Router {
         .route("/tools/rollback", post(rollback))
         .route("/tools/refresh", post(refresh))
         .route("/shutdown", post(shutdown))
+        .route("/shutdown-idle", post(shutdown_idle))
         .method_not_allowed_fallback(|| async {
             (
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -110,6 +119,13 @@ async fn authorize(State(state): State<Arc<Service>>, req: Request, next: Next) 
         )
             .into_response();
     }
+    if state.shutdown.is_cancelled() && !public_compatibility_path {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"서비스 종료 중입니다."})),
+        )
+            .into_response();
+    }
     next.run(req).await
 }
 
@@ -137,49 +153,271 @@ async fn record(
     Ok(Json(s.store.job(&job.id)?))
 }
 async fn delete_job(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<Value> {
-    let _permit = s.finalizer.acquire().await?;
-    let job = {
-        let active = s.active.lock().await;
-        if active.contains_key(&id) {
-            return Err(anyhow::anyhow!("진행 중인 녹화는 삭제할 수 없습니다.").into());
+    delete_job_impl(s, id, false)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+pub(crate) async fn delete_job_impl(
+    s: Arc<Service>,
+    id: String,
+    automatic: bool,
+) -> anyhow::Result<Value> {
+    {
+        let mut active = s.active.lock().await;
+        if s.shutdown.is_cancelled() || active.contains_key(&id) {
+            anyhow::bail!("진행 중인 녹화는 삭제할 수 없습니다.");
         }
         let job = s.store.job(&id)?;
-        if !job.state.terminal() {
-            return Err(anyhow::anyhow!("녹화가 끝난 후 삭제할 수 있습니다.").into());
+        if job.protected {
+            anyhow::bail!("중요 녹화 보호를 해제한 뒤 삭제하세요.");
         }
-        let lock = if job.output_dir.is_dir() {
-            let lock = fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(job.output_dir.join("backup.lock"))?;
-            lock.try_lock_exclusive().map_err(|_| {
-                anyhow::anyhow!("백업 또는 정리가 진행 중입니다. 완료 후 다시 시도하세요.")
-            })?;
-            Some(lock)
-        } else {
-            None
-        };
-        s.store.delete_job(&id)?;
-        (job, lock)
-    };
-    if let Err(error) = tokio::fs::remove_dir_all(&job.0.output_dir).await
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(
-            anyhow::anyhow!("작업은 삭제했지만 녹화 파일 정리에 실패했습니다: {error}").into(),
-        );
+        if !job.state.terminal() {
+            anyhow::bail!("녹화가 끝난 후 삭제할 수 있습니다.");
+        }
+        active.insert(id.clone(), s.shutdown.child_token());
     }
-    Ok(Json(json!({"deleted":true})))
+    tokio::spawn(async move {
+        let result = async {
+            let _permit = s.finalizer.acquire().await?;
+            let job = s.store.job(&id)?;
+            if automatic
+                && !crate::retention::due(
+                    &job,
+                    s.store.settings()?.automation.retention.delete_after_days,
+                )
+            {
+                anyhow::bail!("보관 기간 삭제 대상이 아닙니다.");
+            }
+            let lock = if job.output_dir.is_dir() {
+                let lock = fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(job.output_dir.join("backup.lock"))?;
+                lock.try_lock_exclusive().map_err(|_| {
+                    anyhow::anyhow!("백업 또는 정리가 진행 중입니다. 완료 후 다시 시도하세요.")
+                })?;
+                Some(lock)
+            } else {
+                None
+            };
+            if automatic {
+                s.store
+                    .maintenance_event(&id, "보관 기간 만료 · 파일 삭제 시작")?;
+            }
+            if let Err(error) = tokio::fs::remove_dir_all(&job.output_dir).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(error.into());
+            }
+            s.store.delete_job(&id)?;
+            drop(lock);
+            if automatic {
+                s.store
+                    .maintenance_event(&id, "보관 기간 만료 · 작업 삭제 완료")?;
+            }
+            Ok(json!({"deleted":true}))
+        }
+        .await;
+        s.active.lock().await.remove(&id);
+        result
+    })
+    .await?
 }
 async fn events(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<Vec<JobEvent>> {
     Ok(Json(s.store.events(&id)?))
 }
 
+async fn start_schedule(
+    State(s): State<Arc<Service>>,
+    Path(id): Path<String>,
+    Json(req): Json<RecordingSchedule>,
+) -> ApiResult<RecordingJob> {
+    let active = s.active.lock().await;
+    if active.contains_key(&id) {
+        return Err(anyhow::anyhow!("작업이 실행 중입니다.").into());
+    }
+    let job = s.store.set_start_schedule(&id, req)?;
+    s.store.event(&id, "schedule", "시작 예약 변경")?;
+    Ok(Json(job))
+}
+async fn protect(
+    State(s): State<Arc<Service>>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<RecordingJob> {
+    let active = s.active.lock().await;
+    if active.contains_key(&id) && s.store.job(&id)?.state.terminal() {
+        return Err(anyhow::anyhow!("파일 처리 완료 후 보호 설정을 변경하세요.").into());
+    }
+    let value = body["protected"]
+        .as_bool()
+        .ok_or_else(|| anyhow::anyhow!("보호 설정이 필요합니다."))?;
+    let job = s.store.update_job(&id, |j| j.protected = value)?;
+    s.store.persist_job_manifest(&id)?;
+    Ok(Json(job))
+}
+#[derive(Deserialize)]
+struct RulePreviewRequest {
+    rules: ChannelRules,
+    title: String,
+    at: Option<String>,
+}
+async fn rule_preview(Json(req): Json<RulePreviewRequest>) -> ApiResult<RuleDecision> {
+    req.rules.validate()?;
+    let at = match req.at {
+        Some(at) => parse_rfc3339(&at).ok_or_else(|| anyhow::anyhow!("미리보기 시각 형식 오류"))?,
+        None => chrono::Utc::now(),
+    };
+    Ok(Json(req.rules.evaluate(&req.title, at)))
+}
+async fn notification_status(
+    State(s): State<Arc<Service>>,
+) -> ApiResult<Vec<NotificationDelivery>> {
+    Ok(Json(s.store.notifications(false)?))
+}
+async fn notification_retry(
+    State(s): State<Arc<Service>>,
+    Path(id): Path<i64>,
+) -> ApiResult<Value> {
+    s.store.retry_notification(id)?;
+    Ok(Json(json!({"accepted":true})))
+}
+async fn maintenance_status(State(s): State<Arc<Service>>) -> ApiResult<Vec<Value>> {
+    Ok(Json(s.store.maintenance_events()?))
+}
+
+pub(crate) async fn automatic_cleanup(s: Arc<Service>, id: String) -> anyhow::Result<Value> {
+    let plan = cleanup_job(s.clone(), id.clone(), None, true)
+        .await
+        .map_err(|e| e.0)?
+        .0;
+    let plan: ytlr_engine::cleanup::CleanupPlan = serde_json::from_value(plan)?;
+    if plan.files.is_empty() {
+        return Ok(json!({"reclaimed_bytes":0}));
+    }
+    if !crate::retention::due(
+        &s.store.job(&id)?,
+        s.store.settings()?.automation.retention.cleanup_after_days,
+    ) {
+        anyhow::bail!("자동 정리 대상이 아닙니다.");
+    }
+    cleanup_job(
+        s,
+        id,
+        Some(ytlr_engine::cleanup::CleanupRequest {
+            plan_id: plan.id,
+            all: true,
+            files: vec![],
+        }),
+        true,
+    )
+    .await
+    .map(|j| j.0)
+    .map_err(|e| e.0)
+}
+
+async fn clip(
+    State(s): State<Arc<Service>>,
+    Path(id): Path<String>,
+    Json(req): Json<ClipRequest>,
+) -> ApiResult<Value> {
+    export_media(s, id, 0, Some(req))
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+async fn export_wait(
+    State(s): State<Arc<Service>>,
+    Path(id): Path<String>,
+    Json(req): Json<ExportRequest>,
+) -> ApiResult<Value> {
+    export_media(s, id, req.index, None)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+async fn export_media(
+    s: Arc<Service>,
+    id: String,
+    index: usize,
+    clip: Option<ClipRequest>,
+) -> anyhow::Result<Value> {
+    {
+        let mut active = s.active.lock().await;
+        if s.shutdown.is_cancelled()
+            || active.contains_key(&id)
+            || !s.store.job(&id)?.state.terminal()
+        {
+            anyhow::bail!("파일 처리 중이거나 녹화가 끝나지 않았습니다.");
+        }
+        active.insert(id.clone(), s.shutdown.child_token());
+    }
+    // Detached from request cancellation; deletion/protection changes wait for publication.
+    tokio::spawn(async move {
+        let result = async {
+            let _permit = s.finalizer.acquire().await?;
+            let job = s.store.job(&id)?;
+            let (output, range) = if let Some(req) = clip {
+                let (output, start, end) = req.resolve(&job)?;
+                (output, Some((start, end)))
+            } else {
+                (
+                    job.outputs
+                        .get(index)
+                        .ok_or_else(|| anyhow::anyhow!("결과 파일이 없습니다."))?
+                        .clone(),
+                    None,
+                )
+            };
+            ensure_storage(&job.output_dir, s.store.settings()?.min_free_bytes)?;
+            let extension = if job.recording_options.audio_only {
+                "mka"
+            } else {
+                "mp4"
+            };
+            let dest = job.output_dir.join(format!(
+                "{}-{}.{extension}",
+                if range.is_some() { "clip" } else { "export" },
+                uuid::Uuid::new_v4()
+            ));
+            let output = ytlr_engine::media::remux_range(
+                &s.tools,
+                &[output.path],
+                &dest,
+                &job.recording_options,
+                range,
+            )
+            .await?;
+            s.store
+                .event(&id, "export", &format!("내보내기 완료: {}", dest.display()))?;
+            let bytes = ytlr_engine::files_under(&job.output_dir)?
+                .iter()
+                .filter_map(|p| fs::metadata(p).ok())
+                .map(|m| m.len())
+                .sum();
+            s.store.update_job(&id, |j| j.bytes = bytes)?;
+            s.store.persist_job_manifest(&id)?;
+            Ok::<_, anyhow::Error>(
+                json!({"path":dest,"output":output,"approximate":range.is_some()}),
+            )
+        }
+        .await;
+        if let Err(e) = &result {
+            let _ = s.store.event(&id, "export_error", &e.to_string());
+        }
+        s.active.lock().await.remove(&id);
+        result
+    })
+    .await?
+}
+
 #[derive(Deserialize)]
 struct ScheduleRequest {
     stop_at: Option<String>,
+    schedule: Option<RecordingSchedule>,
 }
 
 async fn schedule(
@@ -187,8 +425,16 @@ async fn schedule(
     Path(id): Path<String>,
     Json(req): Json<ScheduleRequest>,
 ) -> ApiResult<RecordingJob> {
-    let _active = s.active.lock().await;
-    let job = s.store.set_schedule(&id, req.stop_at.as_deref())?;
+    let active = s.active.lock().await;
+    let job = if let Some(schedule) = req.schedule {
+        if active.contains_key(&id) {
+            return Err(anyhow::anyhow!("작업이 실행 중입니다.").into());
+        }
+        s.store
+            .set_full_schedule(&id, schedule, req.stop_at.as_deref())?
+    } else {
+        s.store.set_schedule(&id, req.stop_at.as_deref())?
+    };
     s.store.event(
         &id,
         "schedule",
@@ -239,7 +485,7 @@ async fn cleanup_preview(
     State(s): State<Arc<Service>>,
     Path(id): Path<String>,
 ) -> ApiResult<Value> {
-    cleanup_job(s, id, None).await
+    cleanup_job(s, id, None, false).await
 }
 
 async fn cleanup_execute(
@@ -247,17 +493,21 @@ async fn cleanup_execute(
     Path(id): Path<String>,
     Json(req): Json<ytlr_engine::cleanup::CleanupRequest>,
 ) -> ApiResult<Value> {
-    cleanup_job(s, id, Some(req)).await
+    cleanup_job(s, id, Some(req), false).await
 }
 
 async fn cleanup_job(
     s: Arc<Service>,
     id: String,
     req: Option<ytlr_engine::cleanup::CleanupRequest>,
+    automatic: bool,
 ) -> ApiResult<Value> {
     {
         let mut active = s.active.lock().await;
-        if active.contains_key(&id) || !s.store.job(&id)?.state.terminal() {
+        if s.shutdown.is_cancelled()
+            || active.contains_key(&id)
+            || !s.store.job(&id)?.state.terminal()
+        {
             return Err(anyhow::anyhow!("진행 중인 작업은 정리할 수 없습니다.").into());
         }
         active.insert(id.clone(), s.shutdown.child_token());
@@ -268,7 +518,18 @@ async fn cleanup_job(
         let result = async {
             let _permit = s.finalizer.acquire().await?;
             let job = s.store.job(&id)?;
+            if automatic
+                && !crate::retention::due(
+                    &job,
+                    s.store.settings()?.automation.retention.cleanup_after_days,
+                )
+            {
+                anyhow::bail!("자동 정리 대상이 아닙니다.");
+            }
             if let Some(req) = req {
+                if job.protected {
+                    anyhow::bail!("중요 녹화 보호를 해제한 뒤 정리하세요.");
+                }
                 let cleanup = ytlr_engine::cleanup::execute(&s.tools, &job, &req).await?;
                 let root = job.output_dir.clone();
                 let recount = tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
@@ -360,6 +621,7 @@ async fn retry(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResu
     let job = s.store.update_job(&id, |j| {
         j.state = JobState::Queued;
         j.stop_at = None;
+        j.schedule = RecordingSchedule::default();
         j.recovery_error = None;
         j.stop_requested = false;
         j.retries = 0;
@@ -371,7 +633,7 @@ async fn retry(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResu
 }
 async fn recover(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<Value> {
     let mut active = s.active.lock().await;
-    if active.contains_key(&id) {
+    if s.shutdown.is_cancelled() || active.contains_key(&id) {
         return Err(anyhow::anyhow!("진행 중인 녹화를 먼저 중지하세요.").into());
     }
     let job = s.store.job(&id)?;
@@ -382,6 +644,7 @@ async fn recover(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiRe
     s.store.update_job(&id, |j| {
         j.stop_requested = false;
         j.stop_at = None;
+        j.schedule = RecordingSchedule::default();
         j.state = JobState::Finalizing;
         j.message = "복구 작업 대기".into();
     })?;
@@ -409,51 +672,10 @@ async fn export(
     Path(id): Path<String>,
     Json(req): Json<ExportRequest>,
 ) -> ApiResult<Value> {
-    let job = s.store.job(&id)?;
-    if !job.state.terminal() {
-        return Err(anyhow::anyhow!("녹화 마무리 후 내보낼 수 있습니다.").into());
-    }
-    let output = job
-        .outputs
-        .get(req.index)
-        .ok_or_else(|| anyhow::anyhow!("영상 파일을 찾을 수 없습니다."))?
-        .clone();
-    // Separate artifact; failed export never replaces the original MKV.
-    let extension = if job.recording_options.audio_only {
-        "mka"
-    } else {
-        "mp4"
-    };
-    let dest = job
-        .output_dir
-        .join(format!("export-{}.{extension}", uuid::Uuid::new_v4()));
-    let result_path = dest.clone();
-    tokio::spawn(async move {
-        let Ok(_permit) = s.finalizer.acquire().await else {
-            return;
-        };
-        match ytlr_engine::remux(&s.tools, &[output.path], &dest, &job.recording_options).await {
-            Ok(_) => {
-                let _ = s.store.event(
-                    &id,
-                    "export",
-                    &format!(
-                        "{} 내보내기 완료: {}",
-                        extension.to_uppercase(),
-                        dest.display()
-                    ),
-                );
-            }
-            Err(e) => {
-                let _ = s.store.event(
-                    &id,
-                    "export_error",
-                    &format!("{} 호환성/내보내기 오류: {e}", extension.to_uppercase()),
-                );
-            }
-        }
-    });
-    Ok(Json(json!({"accepted":true,"path":result_path})))
+    export_media(s, id, req.index, None)
+        .await
+        .map(Json)
+        .map_err(Into::into)
 }
 
 async fn channel_add(
@@ -492,6 +714,9 @@ async fn channel_update(
     if let Some(value) = body.get("live_from_start") {
         channel.live_from_start = serde_json::from_value(value.clone())?;
     }
+    if let Some(value) = body.get("rules") {
+        channel.rules = serde_json::from_value(value.clone())?;
+    }
     s.store.save_channel(&channel)?;
     Ok(Json(channel))
 }
@@ -527,7 +752,7 @@ async fn settings(
 }
 async fn install(State(s): State<Arc<Service>>) -> ApiResult<Value> {
     let active = s.active.lock().await;
-    if !active.is_empty() {
+    if s.shutdown.is_cancelled() || !active.is_empty() {
         return Err(anyhow::anyhow!("진행 중인 작업이 끝난 후 엔진을 설치할 수 있습니다.").into());
     }
     if s.installing.swap(true, Ordering::SeqCst) {
@@ -575,6 +800,23 @@ async fn shutdown(State(s): State<Arc<Service>>) -> ApiResult<Value> {
     Ok(Json(json!({"ok":true})))
 }
 
+async fn shutdown_idle(State(s): State<Arc<Service>>) -> ApiResult<Value> {
+    // Serialize with scheduler reservations: checking a snapshot then shutting down
+    // would race a newly-started recording. Queued schedules remain persisted.
+    let active = s.active.lock().await;
+    if !active.is_empty()
+        || s.installing.load(Ordering::SeqCst)
+        || s.store.jobs()?.iter().any(|j| j.state.active())
+    {
+        return Err(anyhow::anyhow!(
+            "녹화 또는 파일 처리 중입니다. 완료 후 업데이트를 설치하세요."
+        )
+        .into());
+    }
+    s.shutdown.cancel();
+    Ok(Json(json!({"ok":true})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,6 +857,7 @@ mod tests {
             .store
             .add_job(
                 &RecordRequest {
+                    schedule: RecordingSchedule::default(),
                     stop_at: None,
                     recording_options: RecordingOptions::default(),
                     url: "https://youtu.be/abcdefghijk".into(),
@@ -678,6 +921,138 @@ mod tests {
         let (status, body) = send(state, "DELETE", "/jobs/missing/extra", "{}").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("error"));
+    }
+
+    #[tokio::test]
+    async fn idle_shutdown_refuses_work_and_preserves_queued_schedules() {
+        let (state, _d) = service();
+        let job = completed_job(&state);
+        state
+            .active
+            .lock()
+            .await
+            .insert(job.id.clone(), state.shutdown.child_token());
+        assert_eq!(
+            send(state.clone(), "POST", "/shutdown-idle", "{}").await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(!state.shutdown.is_cancelled());
+        state.active.lock().await.clear();
+        state
+            .store
+            .update_job(&job.id, |j| j.state = JobState::Recording)
+            .unwrap();
+        assert_eq!(
+            send(state.clone(), "POST", "/shutdown-idle", "{}").await.0,
+            StatusCode::BAD_REQUEST
+        );
+        state
+            .store
+            .update_job(&job.id, |j| {
+                j.state = JobState::Queued;
+                j.schedule.start_at = Some("2030-01-01T00:00:00Z".into());
+            })
+            .unwrap();
+        state.installing.store(true, Ordering::SeqCst);
+        assert_eq!(
+            send(state.clone(), "POST", "/shutdown-idle", "{}").await.0,
+            StatusCode::BAD_REQUEST
+        );
+        state.installing.store(false, Ordering::SeqCst);
+        assert_eq!(
+            send(state.clone(), "POST", "/shutdown-idle", "{}").await.0,
+            StatusCode::OK
+        );
+        assert!(state.shutdown.is_cancelled());
+        assert_eq!(state.store.job(&job.id).unwrap().state, JobState::Queued);
+        assert_eq!(
+            send(
+                state.clone(),
+                "POST",
+                "/jobs",
+                "{\"url\":\"https://youtu.be/lmnopqrstuv\"}"
+            )
+            .await
+            .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(state.store.jobs().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn protected_jobs_reject_deletion_and_invalid_clip_releases_guard() {
+        let (state, _d) = service();
+        let job = completed_job(&state);
+        let (status, _) = send(
+            state.clone(),
+            "PUT",
+            &format!("/jobs/{}/protect", job.id),
+            "{\"protected\":true}",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            send(state.clone(), "DELETE", &format!("/jobs/{}", job.id), "{}")
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(job.output_dir.exists());
+        assert_eq!(
+            send(
+                state.clone(),
+                "POST",
+                &format!("/jobs/{}/clip", job.id),
+                "{\"bookmark_id\":\"missing\"}"
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(!state.active.lock().await.contains_key(&job.id));
+        send(
+            state.clone(),
+            "PUT",
+            &format!("/jobs/{}/protect", job.id),
+            "{\"protected\":false}",
+        )
+        .await;
+        assert_eq!(
+            send(state, "DELETE", &format!("/jobs/{}", job.id), "{}")
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_retention_rechecks_protection_and_policy() {
+        let (state, _d) = service();
+        let job = completed_job(&state);
+        state
+            .store
+            .update_job(&job.id, |j| {
+                j.finished_at = Some("2020-01-01T00:00:00Z".into());
+                j.protected = true;
+            })
+            .unwrap();
+        let mut settings = state.store.settings().unwrap();
+        settings.automation.retention.delete_after_days = Some(1);
+        state.store.save_settings(&settings).unwrap();
+        assert!(
+            delete_job_impl(state.clone(), job.id.clone(), true)
+                .await
+                .is_err()
+        );
+        state
+            .store
+            .update_job(&job.id, |j| j.protected = false)
+            .unwrap();
+        delete_job_impl(state.clone(), job.id.clone(), true)
+            .await
+            .unwrap();
+        assert!(state.store.job(&job.id).is_err());
+        assert!(state.store.maintenance_events().unwrap().len() >= 2);
     }
 
     #[tokio::test]

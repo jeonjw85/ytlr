@@ -16,7 +16,7 @@ YTLR is a durable live-stream recording application for macOS, Linux, and
 Windows. It keeps source media when a stream reconnects or a service is
 restarted, and provides both a Tauri desktop app and a command-line client.
 
-The project is currently at **0.2.3** and is in stabilization testing.
+The project is currently at **0.2.4** and is in stabilization testing.
 
 <p align="center">
   <img src="docs/recording.png" alt="YTLR recording a live stream" width="780">
@@ -28,6 +28,11 @@ The project is currently at **0.2.3** and is in stabilization testing.
 </p>
 
 ## Highlights
+
+- Channel keyword/weekly-window rules, scheduled starts, and recording duration limits
+- Durable Webhook/Discord/Telegram notifications with retries
+- Library filters and batch actions, bookmark clips, protected recordings, and retention policies
+- Signed desktop app update checks and installation
 
 - Record a live URL, wait for a scheduled stream, or monitor a channel.
 - Select the best stream available through `yt-dlp` and record without
@@ -60,6 +65,55 @@ The project is currently at **0.2.3** and is in stabilization testing.
   Linux server.
 - **Media tools:** `yt-dlp` selects streams and FFmpeg captures and validates
   media. Release bundles include the required tools.
+
+## App updates
+
+Signed release builds check GitHub Releases for a newer stable version about 30 seconds after
+launch and every six hours while running. **Settings → App updates** provides automatic-check
+preferences, manual checks, release notes, download progress, and **Download and install**.
+Installation is explicitly requested; downloads are signature-verified before stopping the local
+service. Recordings can continue during downloading. Active recording, file processing, or engine
+installation defers installation until you retry. A verified download is reused within the current
+app session. The service lock is held during installation to prevent the old sidecar restarting.
+Queued/scheduled jobs stay in the database and resume with the updated app. Remote servers are
+updated separately.
+
+macOS uses app-bundle updates, Windows uses the matching NSIS/MSI installer, and Linux supports
+AppImage updates. Update `.deb` packages manually from the releases page. Development builds and
+ordinary local builds without an update public key disable automatic updates. Apps predating this
+feature require one manual upgrade to an updater-enabled release.
+
+### Release signing setup
+
+Generate an updater key once (independent of macOS code signing/notarization):
+
+```sh
+pnpm --dir apps/desktop tauri signer generate -w "$HOME/.tauri/ytlr.key"
+```
+
+Configure the repository's **Settings → Secrets and variables → Actions**:
+
+| Type | Name | Value |
+|---|---|---|
+| Variable | `YTLR_UPDATER_PUBLIC_KEY` | Complete generated `.pub` file contents |
+| Secret | `TAURI_SIGNING_PRIVATE_KEY` | Complete private key file contents |
+| Secret | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Key password, or empty if none |
+
+Keep the private key outside the repository and retain it for subsequent releases: installed apps
+verify updates against their embedded public key. Match the `vX.Y.Z` tag to the root and desktop
+package versions, Tauri config, and Rust workspace version. The release workflow runs
+`pnpm build:release` after a signing/verification probe checks the private key, password, and public
+key. It verifies artifact signatures and their signed versions for macOS Apple Silicon, Windows x64,
+and Linux x64, collects them into `latest.json`, uploads
+everything to a draft release, then publishes it. Missing keys, mismatched versions, and missing
+signatures fail the release. Signature verification runs both when creating platform manifests and
+when merging the uploaded artifacts. Prerelease tags remain excluded from stable automatic checks.
+
+For local signed builds, set the same environment variables and `GITHUB_REF_NAME=vX.Y.Z`, then
+run `pnpm build:release`. Ordinary development/local builds still use `pnpm dev` / `pnpm build`.
+Before pushing a release tag, manually dispatch the `release` workflow with the proposed `tag`
+to validate signing, packaging, and the complete updater manifest. Manual runs do not publish a
+release; publication occurs only on a tag push.
 
 ## Requirements
 
@@ -305,6 +359,97 @@ pnpm test:soak --seconds 86400
 The CI workflows cover core and GUI builds on Linux and Windows. Public live
 compatibility, 24- to 72-hour operation, power loss, physical disk failure,
 and platform-specific signing still require field validation.
+
+## Automation and library tools
+
+These features use service API 3. Finish current recordings, run `ytlr shutdown`, and restart
+with the updated service. Update remote services as well; incompatible services reject requests.
+
+- **Channel rules:** edit include/exclude title keywords in channel recording options. Matching is
+  case-insensitive, any include keyword is sufficient, and exclusions take precedence. Preview a
+  title/time before saving; the last 20 decisions are shown in channel options.
+- **Weekly windows:** choose weekdays and start/end times using a fixed UTC offset in minutes
+  (Korea: `540`). Weekdays refer to the start day. An end at or before the start is the following
+  day; equal times mean 24 hours. DST adjustments are manual. Recordings stop at the window end.
+  Detection follows the configured scan interval. Missed windows are skipped; restarting within
+  a window records its remaining portion. Durable per-broadcast/window history prevents duplicate
+  recording after restart, manual stop, or retention deletion. Existing jobs keep their original rules.
+- **Start schedules:** set an absolute start time and an optional duration after recording starts.
+  Duration begins at the first capture attempt, includes reconnect time, and survives restarts.
+  The earlier of this limit and an explicit stop deadline wins. Manual retry/recovery clears schedules.
+- **Library:** combine channel, state, local-date, text, and protected-only filters; sort by date,
+  size, or title. Batch export processes every output of each selected job and reports per-job results.
+  Batch cleanup previews files before applying the existing hash/media revalidation.
+- **Clips:** export seconds around a bookmark or the range between two bookmarks to MP4/MKA.
+  Stream copying preserves the source; boundaries are approximate by keyframe. Unknown positions,
+  reversed ranges, and ranges crossing recording attempts are rejected.
+- **Retention:** opt into verified source-segment cleanup and/or entire-recording deletion after
+  a number of days from completion. Legacy jobs use their last update as their completion date.
+  Policies run at service start and hourly. Whole-recording deletion wins when both are due.
+  Backups and remote replicas are retained. Protected jobs reject both manual and automatic
+  cleanup/deletion. Audit history survives job deletion.
+
+```sh
+ytlr record 'https://youtu.be/VIDEO_ID' --start-at '2026-10-01T20:00:00+09:00' --duration-minutes 120
+ytlr start-schedule JOB_ID --start-at '2026-10-01T21:00:00+09:00'
+ytlr start-schedule JOB_ID  # clear start schedule and duration limit
+ytlr channel rules CHANNEL_ID --file rules.json --preview-title 'Concert' --at '2026-10-05T23:30:00+09:00'
+ytlr channel rules CHANNEL_ID --file rules.json
+ytlr library --state completed --sort size --export
+ytlr library --protected --cleanup-preview
+ytlr clip JOB_ID BOOKMARK_ID --before 30 --after 60
+ytlr clip JOB_ID START_BOOKMARK_ID --end-bookmark END_BOOKMARK_ID
+ytlr protect JOB_ID
+ytlr protect JOB_ID --clear
+ytlr maintenance
+```
+
+Example `rules.json` (read from the CLI machine, including in remote mode):
+
+```json
+{
+  "include": ["concert"], "exclude": ["test"],
+  "window": { "weekdays": [1, 2, 3, 4, 5], "start_minute": 1380, "end_minute": 60, "utc_offset_minutes": 540 },
+  "duration_minutes": 90
+}
+```
+
+### Service notifications
+
+Configure Webhook, Discord, or Telegram destinations in **Settings → Automation and retention**.
+Recording starts/finishes, incident opening/resolution, and storage warnings are durably queued in
+SQLite even when the desktop app is closed. Failures retry with exponential backoff capped at one
+hour. Delivery is at-least-once: a crash after sending can cause a duplicate. Generic webhook receivers
+can deduplicate by `delivery_id`.
+
+Settings contain **environment variable names**, not URLs/tokens. Set the actual variables in the
+service process environment (shell, systemd, or launchd) before starting it. Changing a shell variable
+does not update an already-running service. Remote services use their own environment. HTTPS is
+required except for localhost HTTP testing. Removing a destination keeps its pending messages;
+recreating the same destination ID resumes delivery.
+
+Example `automation.json`:
+
+```json
+{
+  "notifications": [
+    { "id": "ops", "kind": "webhook", "url_env": "YTLR_WEBHOOK_URL" },
+    { "id": "discord", "kind": "discord", "url_env": "YTLR_DISCORD_URL" },
+    { "id": "telegram", "kind": "telegram", "token_env": "YTLR_TELEGRAM_TOKEN", "chat_id": "CHAT_ID" }
+  ],
+  "retention": { "cleanup_after_days": 7, "delete_after_days": null }
+}
+```
+
+```sh
+ytlr automation --file automation.json  # replace all automation settings
+ytlr notifications
+ytlr notifications --retry DELIVERY_ID
+```
+
+Generic webhooks receive a JSON POST:
+`{ "delivery_id": 1, "event": { "job_id": "…", "kind": "…", "at": "…", "message": "…" } }`.
+Recent delivery results and failures are available in Settings and the CLI.
 
 ## License
 

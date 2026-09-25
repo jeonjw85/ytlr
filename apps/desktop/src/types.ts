@@ -26,6 +26,9 @@ export const defaultRecordingOptions: RecordingOptions = {
   max_height: null,
 };
 export interface Job {
+  schedule?: RecordingSchedule;
+  protected?: boolean;
+  finished_at?: string | null;
   stop_at?: string | null;
   bookmarks?: Bookmark[];
   alerts?: JobAlert[];
@@ -94,6 +97,8 @@ export interface TimelineGap {
   } | null;
 }
 export interface Channel {
+  rules?: ChannelRules;
+  decisions?: RuleDecision[];
   recording_options?: RecordingOptions;
   live_from_start?: boolean | null;
   id: string;
@@ -105,6 +110,7 @@ export interface Channel {
   last_error: string | null;
 }
 export interface Settings {
+  automation?: AutomationSettings;
   storage_root: string;
   max_recordings: number;
   scan_interval_secs: number;
@@ -188,6 +194,52 @@ export interface CleanupPlan {
   retained: MediaOutput[];
   reclaimable_bytes: number;
 }
+
+export interface RecordingSchedule {
+  start_at: string | null;
+  duration_minutes: number | null;
+}
+export interface WeeklyWindow {
+  weekdays: number[];
+  start_minute: number;
+  end_minute: number;
+  utc_offset_minutes: number;
+}
+export interface ChannelRules {
+  include: string[];
+  exclude: string[];
+  window: WeeklyWindow | null;
+  duration_minutes: number | null;
+}
+export interface RuleDecision {
+  at: string;
+  title: string;
+  allowed: boolean;
+  reason: string;
+  window_start: string | null;
+  stop_at: string | null;
+}
+export const defaultRules: ChannelRules = {
+  include: [],
+  exclude: [],
+  window: null,
+  duration_minutes: null,
+};
+export type NotificationTarget = { id: string } & (
+  | { kind: "webhook" | "discord"; url_env: string }
+  | { kind: "telegram"; token_env: string; chat_id: string }
+);
+export interface AutomationSettings {
+  notifications: NotificationTarget[];
+  retention: {
+    cleanup_after_days: number | null;
+    delete_after_days: number | null;
+  };
+}
+export const defaultAutomation: AutomationSettings = {
+  notifications: [],
+  retention: { cleanup_after_days: null, delete_after_days: null },
+};
 
 export const stateLabels: Record<JobState, string> = {
   queued: "대기 중",

@@ -589,6 +589,25 @@ pub async fn remux(
     dest: &Path,
     options: &ytlr_core::RecordingOptions,
 ) -> Result<MediaOutput> {
+    remux_range(tools, inputs, dest, options, None).await
+}
+
+pub async fn remux_range(
+    tools: &Tools,
+    inputs: &[PathBuf],
+    dest: &Path,
+    options: &ytlr_core::RecordingOptions,
+    range: Option<(f64, f64)>,
+) -> Result<MediaOutput> {
+    if let Some((start, end)) = range
+        && (!start.is_finite()
+            || !end.is_finite()
+            || start < 0.0
+            || end <= start
+            || inputs.len() != 1)
+    {
+        bail!("클립 구간을 확인하세요.");
+    }
     if dest.exists() {
         bail!("출력 파일이 이미 존재합니다.");
     }
@@ -601,8 +620,14 @@ pub async fn remux(
     let temp = parent.join(format!(".export-{}.partial", uuid::Uuid::new_v4()));
     let mut cmd = tokio::process::Command::new(tools.require("ffmpeg")?);
     cmd.args(["-hide_banner", "-nostdin", "-v", "error", "-n"]);
+    if let Some((start, _)) = range {
+        cmd.arg("-ss").arg(start.to_string());
+    }
     for input in inputs {
         cmd.arg("-i").arg(input);
+    }
+    if let Some((start, end)) = range {
+        cmd.arg("-t").arg((end - start).to_string());
     }
     if options.audio_only {
         cmd.args(["-map", "0:a:0"]);

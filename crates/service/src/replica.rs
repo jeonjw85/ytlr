@@ -28,6 +28,7 @@ async fn deliver(
         client
             .replica_record(
                 &RecordRequest {
+                    schedule: job.schedule.clone(),
                     stop_at: job.stop_at.clone(),
                     recording_options: job.recording_options.clone(),
                     url: job.url.clone(),
@@ -43,6 +44,19 @@ async fn deliver(
             .post(
                 &format!("/jobs/{}/stop", remote_job.id),
                 &serde_json::json!({}),
+            )
+            .await?;
+    }
+    if (remote_job.schedule != job.schedule || remote_job.stop_at != job.stop_at)
+        && remote_job.attempt == 0
+        && matches!(remote_job.state, JobState::Queued | JobState::Waiting)
+        && !remote_job.stop_requested
+    {
+        remote_job = client
+            .request(
+                reqwest::Method::PUT,
+                &format!("/jobs/{}/schedule", remote_job.id),
+                Some(&serde_json::json!({"schedule":job.schedule,"stop_at":job.stop_at})),
             )
             .await?;
     }

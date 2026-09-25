@@ -169,7 +169,9 @@ pub fn inventory(job: &RecordingJob) -> Result<BTreeMap<String, u64>> {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         let category = if job.outputs.iter().any(|o| o.path == path) {
             "results"
-        } else if name.starts_with("export-") && !name.ends_with(".json") {
+        } else if (name.starts_with("export-") || name.starts_with("clip-"))
+            && !name.ends_with(".json")
+        {
             "exports"
         } else if name.contains("-Frag") {
             "fragments"

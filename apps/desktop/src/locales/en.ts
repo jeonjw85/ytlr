@@ -1,4 +1,43 @@
+import { automationEnglish } from "./automation.en";
+
 export const english: Record<string, string> = {
+  "앱 업데이트": "App updates",
+  "새 버전을 확인할 수 있습니다.": "Ready to check for updates.",
+  "업데이트 확인 중…": "Checking for updates…",
+  "새 버전을 설치할 수 있습니다.": "A new version is available.",
+  "최신 버전입니다.": "You are up to date.",
+  "업데이트 다운로드·서명 검증 중…": "Downloading and verifying update…",
+  "다운로드 완료 · 설치 대기": "Download complete · waiting to install",
+  "로컬 서비스 종료·업데이트 설치 중…":
+    "Stopping the local service and installing update…",
+  "업데이트 완료 · 앱 재시작 중…": "Update installed · restarting app…",
+  "업데이트를 완료하지 못했습니다.": "The update could not be completed.",
+  "업데이트 알림 닫기": "Dismiss update notice",
+  "업데이트 다운로드 진행률": "Update download progress",
+  "새 버전 자동 확인": "Automatically check for updates",
+  "앱 시작 후와 6시간마다 확인합니다. 설치는 버튼을 눌렀을 때 진행하며, 녹화·파일 처리 중이면 보류합니다.":
+    "Checks after launch and every six hours. Installation starts when requested and is deferred while recording or processing files.",
+  "이 컴퓨터의 앱과 로컬 녹화 서비스를 업데이트합니다. 원격 서버는 별도로 업데이트하세요.":
+    "Updates this computer's app and local recording service. Update remote servers separately.",
+  "마지막 업데이트 확인": "Last update check",
+  "릴리스 변경 사항": "Release notes",
+  "지금 업데이트 확인": "Check for updates now",
+  "설치 및 재시작": "Install and restart",
+  "다운로드 및 설치": "Download and install",
+  "릴리스 페이지 열기": "Open releases page",
+  "개발 빌드에서는 자동 업데이트를 사용하지 않습니다.":
+    "Automatic updates are disabled in development builds.",
+  "Linux 자동 업데이트는 AppImage에서 지원됩니다.":
+    "Automatic updates on Linux require AppImage.",
+  "업데이트 서명 공개키가 설정되지 않은 빌드입니다.":
+    "This build does not have an update signing public key.",
+  "녹화 또는 파일 처리 중입니다. 완료 후 업데이트를 설치하세요.":
+    "Recording or file processing is active. Install the update after it finishes.",
+  "로컬 요청이 처리 중입니다. 완료 후 업데이트를 설치하세요.":
+    "A local request is still running. Install the update after it finishes.",
+  "업데이트 작업이 이미 진행 중입니다.":
+    "An update operation is already running.",
+  ...automationEnglish,
   "종료 예약": "Stop timer",
   "예약 없음": "No stop timer",
   "지금부터 N분 뒤": "Minutes from now",
