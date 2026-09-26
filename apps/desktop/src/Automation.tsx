@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "./api";
 import { useI18n } from "./i18n";
+import { NotificationHistory } from "./NotificationHistory";
 import { deadlineDraft } from "./JobTools";
 import {
   defaultAutomation,
@@ -506,7 +507,7 @@ export function AutomationFields({
         >
           {t("알림 대상 추가")}
         </button>
-        {["notifications", "maintenance"].map((path) => (
+        {["maintenance"].map((path) => (
           <button
             key={path}
             type="button"
@@ -524,6 +525,7 @@ export function AutomationFields({
           </button>
         ))}
       </div>
+      <NotificationHistory />
       {status !== null && (
         <pre className="automation-log">{JSON.stringify(status, null, 2)}</pre>
       )}

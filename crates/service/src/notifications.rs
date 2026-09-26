@@ -11,7 +11,11 @@ async fn deliver(
     let text: String = format!(
         "YTLR · {}\n{}\n{}",
         delivery.body["kind"].as_str().unwrap_or(""),
-        delivery.body["job_id"].as_str().unwrap_or(""),
+        delivery.body["title"]
+            .as_str()
+            .or_else(|| delivery.body["job_id"].as_str())
+            .or_else(|| delivery.body["channel_id"].as_str())
+            .unwrap_or(""),
         delivery.body["message"].as_str().unwrap_or("")
     )
     .chars()
@@ -59,7 +63,14 @@ async fn deliver(
         .await
         .map_err(|_| anyhow::anyhow!("알림 연결 실패 또는 시간 초과"))?;
     if !response.status().is_success() {
-        bail!("알림 전송 HTTP {}", response.status().as_u16());
+        let reason = match response.status().as_u16() {
+            401 | 403 => "인증 또는 권한 오류",
+            404 => "알림 대상 없음",
+            429 => "전송 요청 한도 초과",
+            400 => "알림 대상 또는 요청 형식 오류",
+            _ => "알림 서버 오류",
+        };
+        bail!("{reason} (HTTP {})", response.status().as_u16());
     }
     if matches!(target, NotificationTarget::Telegram { .. }) {
         let result: serde_json::Value = response

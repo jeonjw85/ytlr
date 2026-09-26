@@ -3,6 +3,7 @@ pub mod cleanup;
 pub mod media;
 pub mod process;
 pub mod recovery;
+pub mod render;
 pub mod tools;
 
 pub use capture::*;

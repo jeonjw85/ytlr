@@ -52,6 +52,10 @@ import {
 import { Library } from "./Library";
 import { Clips } from "./Clips";
 import { AppUpdates } from "./AppUpdates";
+import { Operations } from "./Operations";
+import { Startup } from "./Startup";
+import { Configuration } from "./Configuration";
+import { MediaLibrary } from "./MediaLibrary";
 import {
   DeadlineFields,
   deadlineDraft,
@@ -63,6 +67,7 @@ import {
 import {
   bytes,
   defaultRecordingOptions,
+  channelErrorLabels,
   defaultRules,
   type ChannelRules,
   type RecordingSchedule,
@@ -77,14 +82,16 @@ import {
   type Remote,
   type Settings,
   type Snapshot,
+  type Operation,
 } from "./types";
 
-type Page = "recordings" | "channels" | "library" | "settings";
+type Page = "recordings" | "channels" | "library" | "settings" | "operations";
 const pageInfo: Record<Page, string> = {
   recordings: "녹화",
   channels: "채널",
   library: "보관함",
   settings: "설정",
+  operations: "작업",
 };
 
 export default function App() {
@@ -107,6 +114,7 @@ export default function App() {
   const previous = useRef<Map<string, string>>(new Map());
   const warnedStorage = useRef<Set<string>>(new Set());
   const previousAlerts = useRef<Map<string, boolean>>(new Map());
+  const previousChannelAlerts = useRef<Map<string, boolean>>(new Map());
   const initialized = useRef(false);
   const fetching = useRef(false);
   const refreshPending = useRef(false);
@@ -132,6 +140,26 @@ export default function App() {
         if (epoch !== connectionEpoch.current) return;
         setSnapshot(next);
         setConnectionError("");
+        for (const channel of next.channels) {
+          const active = channel.health?.incident_open ?? false;
+          const before = previousChannelAlerts.current.get(channel.id);
+          if (
+            next.settings.notifications &&
+            ((active && before !== true) || (!active && before === true))
+          ) {
+            const granted = await isPermissionGranted();
+            if (epoch !== connectionEpoch.current) return;
+            if (granted)
+              sendNotification({
+                title: t(active ? "채널 감시 오류" : "채널 감시 복구"),
+                body: channel.name,
+              });
+          }
+        }
+        if (epoch !== connectionEpoch.current) return;
+        previousChannelAlerts.current = new Map(
+          next.channels.map((c) => [c.id, c.health?.incident_open ?? false]),
+        );
         const lowStorage = (next.storage ?? []).filter(
           (disk) => disk.low_space,
         );
@@ -232,6 +260,7 @@ export default function App() {
     initialized.current = false;
     warnedStorage.current.clear();
     previousAlerts.current.clear();
+    previousChannelAlerts.current.clear();
     setSnapshot(null);
     setDetail(null);
     setEditingChannel(null);
@@ -321,6 +350,7 @@ export default function App() {
               ["recordings", LayoutDashboard, "녹화"],
               ["channels", Radio, "채널"],
               ["library", FolderOpen, "보관함"],
+              ["operations", Activity, "작업"],
             ] as const
           ).map(([key, Icon, label]) => (
             <button
@@ -396,6 +426,20 @@ export default function App() {
         </header>
         <div className="content">
           <AppUpdates settings={page === "settings"} />
+          {snapshot?.power?.message &&
+            (snapshot.power.requested ||
+              snapshot.power.waiting_jobs > 0 ||
+              (snapshot.power.watching_channels ?? 0) > 0) && (
+              <p
+                className={
+                  snapshot.power.requested && !snapshot.power.active
+                    ? "inline-error"
+                    : "tip"
+                }
+              >
+                {t(snapshot.power.message)}
+              </p>
+            )}
           <div className="page-heading">
             <div>
               <h1>{t(pageInfo[page])}</h1>
@@ -661,10 +705,14 @@ export default function App() {
                       </p>
                       <div className="channel-meta">
                         <span
-                          className={`status-light ${channel.enabled ? "" : "offline"}`}
+                          className={`status-light ${channel.enabled && !channel.health?.incident_open ? "" : "offline"}`}
                         />
                         {t(
-                          channel.enabled ? "방송 자동 감시" : "감시 일시 중지",
+                          channel.enabled
+                            ? channel.health?.incident_open
+                              ? "감시 확인 필요"
+                              : "방송 자동 감시"
+                            : "감시 일시 중지",
                         )}
                       </div>
                       <p>
@@ -680,6 +728,21 @@ export default function App() {
                       </button>
                       {channel.last_error && (
                         <p className="inline-error">{t(channel.last_error)}</p>
+                      )}
+                      {channel.health && (
+                        <p className="muted">
+                          {t("최근 감시 성공")}:{" "}
+                          {channel.health.last_success_at
+                            ? new Date(
+                                channel.health.last_success_at,
+                              ).toLocaleString(dateLocale)
+                            : t("아직 없음")}
+                          <br />
+                          {t("연속 실패")}:{" "}
+                          {channel.health.consecutive_failures}
+                          {channel.health.error_kind &&
+                            ` · ${t(channelErrorLabels[channel.health.error_kind] ?? channel.health.error_kind)}`}
+                        </p>
                       )}
                       <div className="channel-footer">
                         <span>
@@ -737,6 +800,23 @@ export default function App() {
           )}
 
           {page === "settings" && <AppPreferences />}
+          {page === "operations" && (
+            <Operations
+              key={connection}
+              operations={snapshot?.operations ?? []}
+              jobs={jobs}
+              onChanged={refresh}
+              remote={connection !== "local"}
+            />
+          )}
+          {page === "settings" && <Startup />}
+          {page === "settings" && snapshot && (
+            <Configuration
+              key={connection}
+              root={snapshot.settings.storage_root}
+              onChanged={refresh}
+            />
+          )}
           {page === "settings" && snapshot && (
             <SettingsView
               snapshot={snapshot}
@@ -785,6 +865,8 @@ export default function App() {
       {selectedJob && (
         <Details
           job={selectedJob}
+          operations={snapshot?.operations ?? []}
+          remote={connection !== "local"}
           onClose={() => setDetail(null)}
           onAction={safeAction}
           onOpen={safeOpen}
@@ -1508,6 +1590,8 @@ function RemoteDialog({
 
 function Details({
   job,
+  operations,
+  remote,
   onClose,
   onAction,
   onOpen,
@@ -1515,6 +1599,8 @@ function Details({
   onChanged,
 }: {
   job: Job;
+  operations: Operation[];
+  remote: boolean;
   onClose: () => void;
   onAction: (
     path: string,
@@ -1651,13 +1737,27 @@ function Details({
       <JobSchedule key={`schedule-${job.id}`} job={job} onChanged={onChanged} />
       <StartSchedule key={`start-${job.id}`} job={job} onChanged={onChanged} />
       <Clips key={`clips-${job.id}`} job={job} onChanged={onChanged} />
+      {isTerminal(job) && (
+        <MediaLibrary
+          key={`media-${job.id}`}
+          job={job}
+          operations={operations}
+          remote={remote}
+          onChanged={onChanged}
+        />
+      )}
       <JobBookmarks
         key={`bookmarks-${job.id}`}
         job={job}
         onChanged={onChanged}
       />
       {isTerminal(job) && (
-        <JobCleanup key={`cleanup-${job.id}`} job={job} onChanged={onChanged} />
+        <JobCleanup
+          key={`cleanup-${job.id}`}
+          job={job}
+          operations={operations}
+          onChanged={onChanged}
+        />
       )}
       {!!job.alerts?.length && (
         <section className="job-tool-section">
@@ -1705,9 +1805,9 @@ function Details({
               )}
               onClick={() =>
                 onAction(
-                  `/jobs/${job.id}/export`,
+                  "/operations",
                   "POST",
-                  { index: i },
+                  [{ job_id: job.id, task: { kind: "export", index: i } }],
                   "내보내기를 시작했습니다. 진행 결과는 이벤트에 표시됩니다.",
                 )
               }
@@ -1747,7 +1847,14 @@ function Details({
           <button
             className="button"
             disabled={!job.attempt}
-            onClick={() => onAction(`/jobs/${job.id}/recover`)}
+            onClick={() =>
+              onAction(
+                "/operations",
+                "POST",
+                [{ job_id: job.id, task: { kind: "recover" } }],
+                "작업 목록에 추가했습니다.",
+              )
+            }
           >
             <ShieldCheck size={15} />
             {t("원본 복구")}
@@ -1872,6 +1979,28 @@ function SettingsView({
           value={settings.automation}
           onChange={(value) => update("automation", value)}
         />
+        <section className="settings-card">
+          <h2>{t("전원 관리")}</h2>
+          <label className="check-field">
+            <input
+              type="checkbox"
+              checked={settings.prevent_sleep ?? true}
+              onChange={(e) => update("prevent_sleep", e.target.checked)}
+            />
+            {t("녹화와 파일 처리 중 절전 방지")}
+          </label>
+          <label className="check-field">
+            <input
+              type="checkbox"
+              checked={settings.keep_awake_waiting ?? false}
+              onChange={(e) => update("keep_awake_waiting", e.target.checked)}
+            />
+            {t("예약과 채널 감시 대기 중에도 절전 방지")}
+          </label>
+          <p className="muted">
+            {t(snapshot.power?.message ?? "절전 방지 대기")}
+          </p>
+        </section>
         <section className="settings-card">
           <div className="settings-heading">
             <HardDrive size={19} />

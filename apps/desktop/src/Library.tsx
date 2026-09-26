@@ -7,6 +7,7 @@ import {
   stateLabels,
   type CleanupPlan,
   type Job,
+  type OperationRequest,
 } from "./types";
 
 export interface LibraryFilter {
@@ -84,67 +85,50 @@ export function Library({
     const api = scopedApi();
     setBusy(true);
     setResults([]);
-    if (kind === "preview") setPlans([]);
-    const items =
-      kind === "cleanup"
-        ? plans
-            .map((p) => jobs.find((j) => j.id === p.job_id))
-            .filter((j): j is Job => !!j)
-        : chosen;
-    const prepared: CleanupPlan[] = [];
     try {
-      for (const job of items) {
-        try {
-          let message = "";
-          if (kind === "preview") {
+      if (kind === "preview") {
+        setPlans([]);
+        const prepared: CleanupPlan[] = [];
+        for (const job of chosen) {
+          try {
             const plan = await api<CleanupPlan>(
               `/jobs/${job.id}/cleanup/preview`,
               "POST",
               {},
             );
             prepared.push(plan);
-            message = `${t("정리 가능")}: ${bytes(plan.reclaimable_bytes)}`;
-          } else if (kind === "cleanup") {
-            const plan = plans.find((p) => p.job_id === job.id)!;
-            if (!plan.files.length) {
-              message = t("정리할 파일 없음");
-            } else {
-              const r = await api<{
-                completed: boolean;
-                reclaimed_bytes: number;
-              }>(`/jobs/${job.id}/cleanup`, "POST", {
-                plan_id: plan.id,
-                all: true,
-              });
-              message = `${t(r.completed ? "정리 완료" : "일부 정리")}: ${bytes(r.reclaimed_bytes)}`;
-            }
-          } else {
-            if (!job.outputs.length)
-              throw new Error(t("결과 파일이 없습니다."));
-            let completed = 0;
-            for (let index = 0; index < job.outputs.length; index++) {
-              try {
-                await api(`/jobs/${job.id}/export-wait`, "POST", { index });
-                completed++;
-              } catch (e) {
-                throw new Error(
-                  `${completed}/${job.outputs.length} · ${String(e)}`,
-                );
-              }
-            }
-            message = `${t("내보내기 완료")} (${completed})`;
+            setResults((r) => [
+              ...r,
+              `${job.title}: ${t("정리 가능")}: ${bytes(plan.reclaimable_bytes)}`,
+            ]);
+          } catch (e) {
+            setResults((r) => [...r, `${job.title}: ${String(e)}`]);
           }
-          setResults((r) => [...r, `${job.title}: ${message}`]);
-        } catch (e) {
-          setResults((r) => [
-            ...r,
-            `${job.title}: ${t("실패")} · ${String(e)}`,
-          ]);
         }
+        setPlans(prepared);
+      } else {
+        const requests: OperationRequest[] =
+          kind === "cleanup"
+            ? plans
+                .filter((p) => p.files.length > 0)
+                .map((p) => ({
+                  job_id: p.job_id,
+                  task: { kind: "cleanup", files: p.files.map((f) => f.path) },
+                }))
+            : chosen.flatMap((j) =>
+                j.outputs.map((_, index) => ({
+                  job_id: j.id,
+                  task: { kind: "export" as const, index },
+                })),
+              );
+        if (!requests.length) throw new Error(t("결과 파일이 없습니다."));
+        await api("/operations", "POST", requests);
+        setResults([t("작업 목록에 추가했습니다.")]);
+        setPlans([]);
       }
-      if (kind === "preview") setPlans(prepared);
-      if (kind === "cleanup") setPlans([]);
       await onChanged();
+    } catch (e) {
+      setResults([String(e)]);
     } finally {
       setBusy(false);
     }

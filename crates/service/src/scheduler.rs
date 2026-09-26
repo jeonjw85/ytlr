@@ -87,7 +87,8 @@ pub async fn schedule(state: Arc<Service>) {
                         || job.schedule.start_at.as_deref().and_then(parse_rfc3339).is_some_and(|at| at > chrono::Utc::now())
                         || job.stop_at.as_deref().and_then(parse_rfc3339).is_some_and(|at| at <= chrono::Utc::now()) { continue; }
                     if active.contains_key(&job.id) { continue; }
-                    if active.len() >= settings.max_recordings {
+                    let recording_slots=active.keys().filter(|id|state.store.job(id).is_ok_and(|j|!j.state.terminal())).count();
+                    if recording_slots >= settings.max_recordings {
                         let _ = state.store.update_job(&job.id, |j| { j.message = "동시 녹화 상한 도달 · 대기 중 앞부분이 누락될 수 있습니다.".into(); });
                         continue;
                     }
@@ -580,16 +581,17 @@ pub async fn monitor(state: Arc<Service>) {
     let mut checked = std::collections::HashMap::<String, Instant>::new();
     loop {
         tokio::select! { _ = state.shutdown.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
-        if state.installing.load(Ordering::SeqCst)
-            || state
-                .tool_status
-                .read()
-                .await
-                .iter()
-                .any(|t| t.error.is_some())
-        {
+        if state.installing.load(Ordering::SeqCst) {
             continue;
         }
+        let engine_error = state
+            .tool_status
+            .read()
+            .await
+            .iter()
+            .filter_map(|t| t.error.as_ref().map(|e| format!("엔진 {}: {e}", t.name)))
+            .collect::<Vec<_>>()
+            .join("; ");
         let Ok(settings) = state.store.settings() else {
             continue;
         };
@@ -602,6 +604,15 @@ pub async fn monitor(state: Arc<Service>) {
                     .get(&channel.id)
                     .is_some_and(|at| at.elapsed().as_secs() < settings.scan_interval_secs)
             {
+                continue;
+            }
+            if !engine_error.is_empty() {
+                checked.insert(channel.id.clone(), Instant::now());
+                let _ = state.store.complete_channel_scan(
+                    &channel.id,
+                    Some(&engine_error),
+                    channel.decisions,
+                );
                 continue;
             }
             let cookie_file = settings.cookies_path.clone();
@@ -678,15 +689,11 @@ pub async fn monitor(state: Arc<Service>) {
                     channel.last_error = Some(redact(&e.to_string()));
                 }
             }
-            // Preserve edits made while the network request was in flight.
-            if let Ok(channels) = state.store.channels()
-                && let Some(mut current) = channels.into_iter().find(|c| c.id == channel.id)
-            {
-                current.last_checked_at = channel.last_checked_at;
-                current.last_error = channel.last_error;
-                current.decisions = channel.decisions;
-                let _ = state.store.save_channel(&current);
-            }
+            let _ = state.store.complete_channel_scan(
+                &channel.id,
+                channel.last_error.as_deref(),
+                channel.decisions,
+            );
         }
     }
 }

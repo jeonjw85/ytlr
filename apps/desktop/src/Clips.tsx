@@ -35,17 +35,21 @@ export function Clips({
           setBusy(true);
           setResult("");
           try {
-            const r = await api<{ path: string }>(
-              `/jobs/${job.id}/clip`,
-              "POST",
+            await api("/operations", "POST", [
               {
-                bookmark_id: start,
-                end_bookmark_id: end || null,
-                before_seconds: before,
-                after_seconds: after,
+                job_id: job.id,
+                task: {
+                  kind: "clip",
+                  request: {
+                    bookmark_id: start,
+                    end_bookmark_id: end || null,
+                    before_seconds: before,
+                    after_seconds: after,
+                  },
+                },
               },
-            );
-            setResult(`${t("내보내기 완료")}: ${r.path}`);
+            ]);
+            setResult(t("작업 목록에 추가했습니다."));
             await onChanged();
           } catch (e) {
             setResult(String(e));

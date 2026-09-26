@@ -24,7 +24,8 @@ if (process.platform === "win32") {
 }
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const home = await mkdtemp(join(tmpdir(), "ytlr-integration-"));
-const cli = join(root, "target/debug/ytlr");
+const cli = join(home, "ytlr");
+await copyFile(join(root, "target/debug/ytlr"), cli);
 const fixture = join(home, "extractor");
 await copyFile(join(root, "tests/fixtures/fake-extractor.mjs"), fixture);
 await chmod(fixture, 0o755);
@@ -653,6 +654,53 @@ try {
       (j) => j.video_id === "qqqqwwwweee" && j.state === "waiting",
     );
   }, "channel detection and scheduled waiting");
+  assert(
+    (await request("/snapshot")).channels.find((c) => c.id === channel.id)
+      .health.last_success_at,
+  );
+  const channelSettings = (await request("/snapshot")).settings;
+  await request("/settings", "PUT", {
+    ...channelSettings,
+    scan_interval_secs: 15,
+  });
+  await writeFile(join(home, "qqqqwwwweee.fail"), "1");
+  await until(
+    async () =>
+      (await request("/snapshot")).channels.find((c) => c.id === channel.id)
+        .health.incident_open,
+    "channel failure incident",
+    65,
+  );
+  assert.equal(
+    (await request(`/channels/${channel.id}/events`)).filter(
+      (e) => e.kind === "channel_failed",
+    ).length,
+    1,
+  );
+  await unlink(join(home, "qqqqwwwweee.fail"));
+  await until(
+    async () =>
+      !(await request("/snapshot")).channels.find((c) => c.id === channel.id)
+        .health.incident_open,
+    "channel recovery incident",
+    35,
+  );
+  assert.equal(
+    (await request(`/channels/${channel.id}/events`)).filter(
+      (e) => e.kind === "channel_recovered",
+    ).length,
+    1,
+  );
+  const testDelivery = await request("/notifications/test", "POST", {
+    target_id: "integration",
+  });
+  await until(
+    async () =>
+      (await request("/notifications")).find(
+        (d) => d.id === testDelivery.delivery_id,
+      )?.delivered,
+    "notification connection test",
+  );
   await request(`/channels/${channel.id}`, "DELETE");
   const waiting = (await request("/snapshot")).jobs.find(
     (j) => j.video_id === "qqqqwwwweee",

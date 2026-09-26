@@ -20,6 +20,16 @@ export async function api<T>(
 }
 export const openJob = (id: string, index?: number) =>
   invoke("open_job", { id, index: index ?? null });
+export const mediaUrl = (id: string, path: string) =>
+  invoke<string>("media_url", { id, path, expectedTarget: target });
+export const queueDownload = (id: string, path: string) =>
+  invoke<import("./types").Operation[]>("queue_download", {
+    id,
+    path,
+    expectedTarget: target,
+  });
+export const openOperation = (id: string, download = false) =>
+  invoke("open_operation", { id, download, expectedTarget: target });
 export const listRemotes = () =>
   invoke<import("./types").Remote[]>("list_remotes");
 export const saveRemote = (remote: import("./types").Remote) =>

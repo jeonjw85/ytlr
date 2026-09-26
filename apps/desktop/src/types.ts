@@ -25,6 +25,12 @@ export const defaultRecordingOptions: RecordingOptions = {
   audio_only: false,
   max_height: null,
 };
+export const channelErrorLabels: Record<string, string> = {
+  authentication: "인증 오류",
+  network: "네트워크 오류",
+  engine: "녹화 엔진 오류",
+  extraction: "방송 정보 조회 오류",
+};
 export interface Job {
   schedule?: RecordingSchedule;
   protected?: boolean;
@@ -97,6 +103,12 @@ export interface TimelineGap {
   } | null;
 }
 export interface Channel {
+  health?: {
+    consecutive_failures: number;
+    last_success_at: string | null;
+    error_kind: string | null;
+    incident_open: boolean;
+  };
   rules?: ChannelRules;
   decisions?: RuleDecision[];
   recording_options?: RecordingOptions;
@@ -110,6 +122,8 @@ export interface Channel {
   last_error: string | null;
 }
 export interface Settings {
+  prevent_sleep?: boolean;
+  keep_awake_waiting?: boolean;
   automation?: AutomationSettings;
   storage_root: string;
   max_recordings: number;
@@ -133,6 +147,14 @@ export interface Tool {
   error: string | null;
 }
 export interface Snapshot {
+  operations?: Operation[];
+  power?: {
+    requested: boolean;
+    active: boolean;
+    waiting_jobs: number;
+    watching_channels?: number;
+    message: string;
+  };
   storage?: StorageStatus[];
   version: string;
   jobs: Job[];
@@ -198,6 +220,56 @@ export interface CleanupPlan {
 export interface RecordingSchedule {
   start_at: string | null;
   duration_minutes: number | null;
+}
+
+export type OperationTask =
+  | { kind: "export"; index: number }
+  | {
+      kind: "clip";
+      request: {
+        bookmark_id: string;
+        end_bookmark_id: string | null;
+        before_seconds: number;
+        after_seconds: number;
+      };
+    }
+  | { kind: "range_clip"; path: string; start: number; end: number }
+  | { kind: "preview"; path: string }
+  | { kind: "recover" }
+  | { kind: "cleanup"; files: string[] }
+  | { kind: "download"; path: string; remote: string };
+export interface OperationRequest {
+  job_id: string;
+  task: OperationTask;
+  source_path?: string | null;
+}
+export interface Operation {
+  id: string;
+  request: OperationRequest;
+  state: "queued" | "running" | "completed" | "failed" | "cancelled";
+  created_at: string;
+  updated_at: string;
+  attempts: number;
+  cancel_requested: boolean;
+  progress: number | null;
+  bytes_done: number;
+  total_bytes: number | null;
+  message: string;
+  error: string | null;
+  result: {
+    path?: string;
+    source?: string;
+    sha256?: string;
+    warnings?: string[];
+    pending_files?: string[];
+    reclaimed_bytes?: number;
+    completed?: boolean;
+  } | null;
+}
+export interface LibraryFile {
+  path: string;
+  bytes: number;
+  preview: boolean;
 }
 export interface WeeklyWindow {
   weekdays: number[];

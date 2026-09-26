@@ -11,6 +11,7 @@
     "check": "pnpm --dir apps/desktop check",
     "test": "pnpm --dir apps/desktop test",
     "test:integration": "node tests/integration/service.mjs",
+    "test:operations": "node tests/integration/operations.mjs",
     "test:remote": "node tests/integration/remote.mjs",
     "test:soak": "node tests/integration/soak.mjs",
     "test:ui": "playwright test --config tests/ui/playwright.config.ts",

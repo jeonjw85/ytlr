@@ -53,6 +53,8 @@ test("app updates show failures, progress, deferred installation and platform fa
       if (command === "list_remotes") return [];
       if (command === "api" && args.path === "/snapshot") return snapshot;
       if (command === "update_status") return status;
+      if (command === "startup_status")
+        return { enabled: false, start_hidden: false };
       if (command === "set_update_preferences") {
         status.auto_check = args.autoCheck;
         return status;

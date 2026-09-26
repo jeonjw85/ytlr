@@ -22,7 +22,7 @@ pub struct ServiceEndpoint {
     pub version: String,
 }
 
-pub const SERVICE_API_VERSION: u32 = 3;
+pub const SERVICE_API_VERSION: u32 = 4;
 
 impl AppPaths {
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self> {
@@ -63,6 +63,8 @@ impl AppPaths {
     }
     pub fn default_settings(&self) -> crate::Settings {
         crate::Settings {
+            prevent_sleep: true,
+            keep_awake_waiting: false,
             automation: crate::AutomationSettings::default(),
             storage_root: self.root.join("recordings"),
             max_recordings: 2,

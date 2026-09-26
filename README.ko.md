@@ -177,6 +177,75 @@ cargo build --release -p ytlr
 `--data-dir PATH` 또는 `YTLR_HOME`을 지정하면 데이터와 서비스를 별도 인스턴스로
 분리해 실행할 수 있습니다. macOS 앱에 포함된 CLI는 `YTLR.app/Contents/MacOS/ytlr`에 있습니다.
 
+## 감시 상태와 백그라운드 작업
+
+채널 화면에는 마지막 감시 성공 시각, 연속 실패 횟수와 오류 종류가 표시됩니다. 세 번 연속
+실패하면 장애를 기록하고 다음 정상 감시 때 복구를 기록합니다. 같은 장애를 반복 전송하지
+않고 재시작 후에도 상태를 유지합니다. 외부 알림 대상으로 장애와 복구를 전송하며, 앱이
+실행 중이면 알림 설정과 권한에 따라 시스템 알림도 표시합니다.
+
+설정의 **알림 연결과 전송 내역**에서는 저장된 대상의 환경변수 설정 여부, 테스트 알림,
+실패 원인과 재전송을 확인합니다. 테스트는 저장된 설정을 사용합니다. 로그인 자동 실행의
+환경변수는 터미널과 다를 수 있으므로 자동 실행 후에도 연결 테스트를 확인하세요.
+
+**자동 시작**은 로그인 시 앱과 로컬 서비스를 실행하고 트레이로 시작할지 선택합니다.
+자동 시작은 기본적으로 꺼져 있습니다. 녹화와 파일 처리 중 절전 방지는 기본적으로 켜져
+있으며, macOS는 `caffeinate`, Windows는 시스템 실행 상태 요청, Linux는 `systemd-inhibit`를
+사용합니다. 적용 실패를 화면에 표시하고, 예약과 채널 감시 대기 중 절전 방지는 별도로
+설정합니다. 전송 종료 후 잠시 유지될 수 있습니다. 컴퓨터 전원 켜기와 강제 절전 해제는
+지원하지 않습니다.
+
+앱의 내보내기, 클립, 미리보기, 복구와 정리는 **작업** 화면에서 관리합니다. 서비스 DB에
+저장되어 앱을 종료해도 처리합니다. 한 번에 최대 100개, 미완료 작업 최대 1000개를 지원합니다.
+재시작 시 원본과 기존 결과를 재검증합니다. 완료 기록이 없는 파일은 보존하고 새 이름으로
+처리합니다. 인코딩은 다시 실행하며 다운로드는 받은 위치부터 이어받습니다. 클립 구간은
+등록 시 확정하므로 이후 북마크 삭제에 영향받지 않습니다. 대기 작업과 실행 중인
+내보내기, 미리보기, 다운로드를 취소할 수 있고, 실행 중인 정리와 복구는 완료까지 기다립니다.
+실패하거나 취소한 작업은 재시도할 수 있습니다. 진행률을 계산하지 않는 단계는 단계명을
+표시합니다. 미완료 작업이 참조하는 녹화는 보관 정책의 정리와 삭제에서 보류됩니다.
+
+## 설정 백업, 미리보기와 원격 다운로드
+
+설정에서 채널, 규칙, 수동으로 등록한 대기 예약과 공통 설정을 JSON으로 옮길 수 있습니다.
+미리보기에는 추가, 교체, 중복, 만료 건수와 적용될 보관 정책을 표시합니다. 같은 채널은
+기본적으로 건너뛰고 교체 옵션을 켜면 규칙과 옵션을 갱신합니다. 예약은 중복 생성하지 않고
+기한이 지난 항목은 건너뜁니다. 검증 실패 시 DB 변경을 모두 취소합니다. 입력 파일은 최대
+4 MiB, 채널과 예약은 각각 최대 1000개입니다. 저장 경로는 대상 장비의 경로로 지정합니다.
+인증 파일 내용, 백업 볼륨 식별 정보와 SSH 연결 설정은 옮기지 않고 대상 장비의 값을 유지합니다.
+채널의 자동 녹화는 가져온 규칙으로 다시 감지합니다.
+
+녹화 상세에서 **미리보기 파일 만들기**를 누르면 원본을 보존하면서 H.264/AAC MP4를
+생성합니다. 음성 전용은 AAC로 미리 들을 수 있습니다. 같은 녹화 시도의 북마크 위치로
+이동하거나 플레이어에서 시작과 끝을 선택해 클립을 만듭니다. 미리보기는 추가 공간을 사용합니다.
+
+원격 파일은 **이 컴퓨터로 다운로드**로 받습니다. SSH 키와 호스트 검증을 사용하는 터널로
+전송하고 로컬 서비스 저장 폴더 아래 `downloads`에 보관합니다. 원격 모드에서도 작업 화면의
+**이 컴퓨터의 다운로드**에서 확인할 수 있습니다. 원격 크기와 SHA-256이 같을 때만 이어받고
+완료 파일도 해시를 검증한 뒤 확정합니다. 전송 결과가 손상되면 다음 재시도는 처음부터 받습니다.
+원격 원본이 바뀌었으면 새 다운로드를 추가하세요.
+
+```sh
+ytlr channel events CHANNEL_ID
+ytlr notifications --test TARGET_ID
+ytlr settings --prevent-sleep true --keep-awake-waiting true
+ytlr operation list
+ytlr operation export JOB_ID --index 0
+ytlr operation recover JOB_ID
+ytlr operation cleanup JOB_ID --file attempt-0001/part-000000.mkv
+ytlr operation cancel OPERATION_ID
+ytlr operation retry OPERATION_ID
+ytlr config-export settings.json
+ytlr config-import settings.json --storage /data/recordings
+ytlr config-import settings.json --storage /data/recordings --replace-channels --settings --apply
+ytlr --remote studio files JOB_ID
+ytlr operation download studio JOB_ID attempt-0001/recording-OUTPUT_ID.mkv
+ytlr operation preview JOB_ID attempt-0001/recording-OUTPUT_ID.mkv
+ytlr operation clip JOB_ID attempt-0001/recording-OUTPUT_ID.mkv --start 30 --end 60
+```
+
+`operation queue FILE`은 `[{"job_id":"JOB_ID","task":{"kind":"export","index":0}}]` 같은
+요청 배열을 읽습니다. 기존 동기식 `export`, `clip`, `cleanup` 명령도 사용할 수 있습니다.
+
 ## 녹화 방식
 
 기본 설정은 **영상 + 음성 / 최고 화질**입니다. 데스크톱의 녹화 추가 화면에서
@@ -301,7 +370,7 @@ yt-dlp가 직접 수집한 원본 조각, 미완성 원본, 검증된 결과, �
 
 ## 자동화와 보관함
 
-이 기능은 서비스 API 3을 사용합니다. 이전 서비스가 실행 중이면 녹화를 마무리하고
+이 기능은 서비스 API 4를 사용합니다. 이전 서비스가 실행 중이면 녹화를 마무리하고
 `ytlr shutdown` 후 새 버전으로 시작하세요. 원격 서비스도 함께 업데이트해야 합니다.
 
 ### 채널 규칙과 주간 반복 녹화
@@ -459,9 +528,11 @@ SSH 키 인증과 신뢰할 호스트 키를 먼저 설정해야 합니다.
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo build -p ytlr
 pnpm check
 pnpm test
 pnpm test:integration
+pnpm test:operations
 pnpm test:ui
 pnpm test:remote
 ```

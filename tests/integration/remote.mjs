@@ -7,7 +7,10 @@ import {
   writeFile,
   chmod,
   copyFile,
+  stat,
+  open,
 } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { createServer } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,7 +19,8 @@ import assert from "node:assert/strict";
 if (process.platform === "win32")
   throw new Error("Use macOS/Linux with an OpenSSH server for this test");
 const home = await mkdtemp(join(tmpdir(), "ytlr-ssh-"));
-const cli = resolve("target/debug/ytlr");
+const cli = join(home, "ytlr");
+await copyFile(resolve("target/debug/ytlr"), cli);
 const extractor = join(home, "extractor");
 await copyFile(resolve("tests/fixtures/fake-extractor.mjs"), extractor);
 await chmod(extractor, 0o755);
@@ -330,6 +334,108 @@ try {
     "local-only command rejected before execution",
   );
   await api(a, `/jobs/${initial.id}/stop`, "POST", {});
+  await until(
+    async () =>
+      (await api(a, "/snapshot")).jobs.find((j) => j.id === initial.id)
+        .state === "stopped",
+    "source stopped before transfer",
+  );
+  const remoteJob = await until(async () => {
+    const j = (await api(b, "/snapshot")).jobs.find(
+      (j) => j.id === target[0].id,
+    );
+    return j.state === "stopped" && j;
+  }, "remote finalized");
+  const transfer = Buffer.alloc(128 * 1024 * 1024, 0x35);
+  await writeFile(join(remoteJob.output_dir, "export-transfer.mp4"), transfer);
+  const transferHash = createHash("sha256").update(transfer).digest("hex");
+  const localSettings = (await api(a, "/snapshot")).settings;
+  await api(a, "/settings", "PUT", { ...localSettings, min_free_bytes: 0 });
+  const [download] = await api(a, "/operations", "POST", [
+    {
+      job_id: remoteJob.id,
+      task: {
+        kind: "download",
+        remote: "replica",
+        path: "export-transfer.mp4",
+      },
+    },
+  ]);
+  const receiving = await until(async () => {
+    const op = (await api(a, "/operations")).find((o) => o.id === download.id);
+    if (op.state === "failed") throw new Error(op.error);
+    return op.bytes_done > 0 && op.bytes_done < transfer.length && op;
+  }, "partial SSH download");
+  await api(a, `/operations/${download.id}/cancel`, "POST", {});
+  const cancelled = await until(async () => {
+    const op = (await api(a, "/operations")).find((o) => o.id === download.id);
+    return op.state === "cancelled" && op;
+  }, "download cancellation");
+  const partial = cancelled.destination.replace(/\.[^.]+$/, ".partial");
+  const received = (await stat(partial)).size;
+  assert(received >= receiving.bytes_done && received < transfer.length);
+  primary.kill("SIGKILL");
+  await new Promise((r) => primary.once("exit", r));
+  primary = await start(a);
+  assert.equal(
+    (await api(a, "/operations")).find((o) => o.id === download.id).state,
+    "cancelled",
+  );
+  transfer[0] ^= 1;
+  await writeFile(join(remoteJob.output_dir, "export-transfer.mp4"), transfer);
+  await api(a, `/operations/${download.id}/retry`, "POST", {});
+  const changed = await until(async () => {
+    const op = (await api(a, "/operations")).find((o) => o.id === download.id);
+    return op.state === "failed" && op;
+  }, "changed remote source rejected");
+  assert(changed.error.includes("원격 파일이 변경"));
+  assert.equal((await stat(partial)).size, received);
+  transfer[0] ^= 1;
+  await writeFile(join(remoteJob.output_dir, "export-transfer.mp4"), transfer);
+  const damaged = await open(partial, "r+");
+  await damaged.write(Buffer.from([0xff]), 0, 1, 0);
+  await damaged.close();
+  await api(a, `/operations/${download.id}/retry`, "POST", {});
+  const corrupt = await until(
+    async () => {
+      const op = (await api(a, "/operations")).find(
+        (o) => o.id === download.id,
+      );
+      return op.state === "failed" && op;
+    },
+    "corrupt partial download rejected",
+    90,
+  );
+  assert(corrupt.error.includes("해시 불일치"));
+  assert.equal((await stat(partial)).size, 0);
+  await api(a, `/operations/${download.id}/retry`, "POST", {});
+  const downloaded = await until(
+    async () => {
+      const op = (await api(a, "/operations")).find(
+        (o) => o.id === download.id,
+      );
+      if (op.state === "failed") throw new Error(op.error);
+      return op.state === "completed" && op;
+    },
+    "resumed SSH download",
+    90,
+  );
+  assert.equal(downloaded.result.sha256, transferHash);
+  assert.equal(
+    createHash("sha256")
+      .update(await readFile(downloaded.result.path))
+      .digest("hex"),
+    transferHash,
+  );
+  assert.equal(downloaded.attempts, 4);
+  await assert.rejects(() =>
+    api(b, `/jobs/${remoteJob.id}/file-info`, "POST", {
+      path: "../service.json",
+    }),
+  );
+  console.log(
+    "[remote] persistent SSH download, cancellation, resume and SHA-256 verification passed",
+  );
   console.log(
     "PASS: real SSH authentication, quoted paths, tunnel API health, CLI target selection, idempotent replica replay, loop prevention, durable delivery state, accurate accepted-vs-recording status",
   );

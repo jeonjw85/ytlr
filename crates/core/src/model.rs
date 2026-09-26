@@ -7,6 +7,10 @@ pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
@@ -39,6 +43,10 @@ impl JobState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default = "default_true")]
+    pub prevent_sleep: bool,
+    #[serde(default)]
+    pub keep_awake_waiting: bool,
     #[serde(default)]
     pub automation: crate::AutomationSettings,
     pub storage_root: PathBuf,
@@ -232,6 +240,8 @@ pub struct MediaOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
     #[serde(default)]
+    pub health: crate::ChannelHealth,
+    #[serde(default)]
     pub rules: crate::ChannelRules,
     #[serde(default)]
     pub decisions: Vec<crate::RuleDecision>,
@@ -296,6 +306,10 @@ pub struct ToolStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub operations: Vec<crate::Operation>,
+    #[serde(default)]
+    pub power: crate::PowerStatus,
     #[serde(default)]
     pub storage: Vec<StorageStatus>,
     pub version: String,

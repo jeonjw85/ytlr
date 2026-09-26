@@ -157,6 +157,33 @@ enum Action {
     Notifications {
         #[arg(long)]
         retry: Option<i64>,
+        #[arg(long, conflicts_with = "retry")]
+        test: Option<String>,
+    },
+    /// Durable background file operations.
+    Operation {
+        #[command(subcommand)]
+        action: OperationAction,
+    },
+    /// List transferable recording result files.
+    Files {
+        id: String,
+    },
+    /// Portable settings/channel/schedule backup.
+    ConfigExport {
+        file: PathBuf,
+    },
+    /// Preview a portable backup; use --apply to commit it atomically.
+    ConfigImport {
+        file: PathBuf,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        replace_channels: bool,
+        #[arg(long)]
+        settings: bool,
+        #[arg(long)]
+        storage: Option<PathBuf>,
     },
     /// Show automatic retention/cleanup history, including deleted jobs.
     Maintenance,
@@ -228,6 +255,10 @@ enum Action {
         replica: Option<String>,
         #[arg(long)]
         po_token: Option<PathBuf>,
+        #[arg(long)]
+        prevent_sleep: Option<bool>,
+        #[arg(long)]
+        keep_awake_waiting: Option<bool>,
     },
     Tools {
         #[command(subcommand)]
@@ -259,6 +290,9 @@ enum Action {
 }
 #[derive(Subcommand)]
 enum ChannelAction {
+    Events {
+        id: String,
+    },
     /// Replace rules from JSON, or preview current/new rules without saving.
     Rules {
         id: String,
@@ -315,6 +349,50 @@ enum BookmarkAction {
     Remove {
         id: String,
         bookmark_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum OperationAction {
+    List,
+    Queue {
+        file: PathBuf,
+    },
+    Export {
+        id: String,
+        #[arg(long, default_value_t = 0)]
+        index: usize,
+    },
+    Preview {
+        id: String,
+        path: String,
+    },
+    Clip {
+        id: String,
+        path: String,
+        #[arg(long)]
+        start: f64,
+        #[arg(long)]
+        end: f64,
+    },
+    Recover {
+        id: String,
+    },
+    Cleanup {
+        id: String,
+        #[arg(long, required = true)]
+        file: Vec<String>,
+    },
+    Download {
+        remote_name: String,
+        id: String,
+        path: String,
+    },
+    Cancel {
+        id: String,
+    },
+    Retry {
+        id: String,
     },
 }
 #[derive(Subcommand)]
@@ -667,7 +745,14 @@ async fn execute() -> Result<()> {
             }
             print_json(&settings.automation)?;
         }
-        Action::Notifications { retry } => {
+        Action::Notifications { retry, test } => {
+            if let Some(target_id) = test {
+                print_json(
+                    &client
+                        .post::<Value>("/notifications/test", &json!({"target_id":target_id}))
+                        .await?,
+                )?;
+            }
             if let Some(id) = retry {
                 let _: Value = client
                     .post(&format!("/notifications/{id}/retry"), &json!({}))
@@ -676,6 +761,30 @@ async fn execute() -> Result<()> {
             print_json(&client.get::<Value>("/notifications").await?)?;
         }
         Action::Maintenance => print_json(&client.get::<Value>("/maintenance").await?)?,
+        Action::Files { id } => {
+            print_json(&client.get::<Value>(&format!("/jobs/{id}/files")).await?)?
+        }
+        Action::Operation { action } => operation_command(&client, action).await?,
+        Action::ConfigExport { file } => {
+            let bundle: ConfigurationBundle = client.get("/configuration/export").await?;
+            atomic_write(
+                &settings_path(file, false)?,
+                &serde_json::to_vec_pretty(&bundle)?,
+            )?;
+        }
+        Action::ConfigImport {
+            file,
+            apply,
+            replace_channels,
+            settings,
+            storage,
+        } => {
+            let bundle: ConfigurationBundle = serde_json::from_slice(&std::fs::read(file)?)?;
+            let root = storage
+                .map(|p| settings_path(p, args.remote.is_some()))
+                .transpose()?;
+            print_json(&client.post::<Value>(if apply {"/configuration/import"} else {"/configuration/preview"},&json!({"bundle":bundle,"replace_channels":replace_channels,"apply_settings":settings,"storage_root":root})).await?)?;
+        }
         Action::Library {
             search,
             channel,
@@ -847,6 +956,11 @@ async fn execute() -> Result<()> {
             }
         }
         Action::Channel { action } => match action {
+            ChannelAction::Events { id } => print_json(
+                &client
+                    .get::<Value>(&format!("/channels/{id}/events"))
+                    .await?,
+            )?,
             ChannelAction::Rules {
                 id,
                 file,
@@ -966,6 +1080,8 @@ async fn execute() -> Result<()> {
             cookies,
             replica,
             po_token,
+            prevent_sleep,
+            keep_awake_waiting,
         } => {
             let mut settings = client.get::<Snapshot>("/snapshot").await?.settings;
             let changed = storage.is_some()
@@ -974,7 +1090,15 @@ async fn execute() -> Result<()> {
                 || backup.is_some()
                 || cookies.is_some()
                 || replica.is_some()
-                || po_token.is_some();
+                || po_token.is_some()
+                || prevent_sleep.is_some()
+                || keep_awake_waiting.is_some();
+            if let Some(value) = prevent_sleep {
+                settings.prevent_sleep = value;
+            }
+            if let Some(value) = keep_awake_waiting {
+                settings.keep_awake_waiting = value;
+            }
             if let Some(storage) = storage {
                 settings.storage_root = settings_path(storage, args.remote.is_some())?;
             }
@@ -1063,6 +1187,80 @@ async fn execute() -> Result<()> {
         } => unreachable!(),
     }
     Ok(())
+}
+
+async fn operation_command(client: &Client, action: OperationAction) -> Result<()> {
+    let request = match action {
+        OperationAction::List => {
+            print_json(&client.get::<Value>("/operations").await?)?;
+            return Ok(());
+        }
+        OperationAction::Queue { file } => {
+            let req: Vec<OperationRequest> = serde_json::from_slice(&std::fs::read(file)?)?;
+            print_json(&client.post::<Value>("/operations", &req).await?)?;
+            return Ok(());
+        }
+        OperationAction::Cancel { id } => {
+            print_json(
+                &client
+                    .post::<Value>(&format!("/operations/{id}/cancel"), &json!({}))
+                    .await?,
+            )?;
+            return Ok(());
+        }
+        OperationAction::Retry { id } => {
+            print_json(
+                &client
+                    .post::<Value>(&format!("/operations/{id}/retry"), &json!({}))
+                    .await?,
+            )?;
+            return Ok(());
+        }
+        OperationAction::Export { id, index } => OperationRequest {
+            job_id: id,
+            source_path: None,
+            task: OperationTask::Export { index },
+        },
+        OperationAction::Preview { id, path } => OperationRequest {
+            job_id: id,
+            source_path: None,
+            task: OperationTask::Preview { path },
+        },
+        OperationAction::Clip {
+            id,
+            path,
+            start,
+            end,
+        } => OperationRequest {
+            job_id: id,
+            source_path: None,
+            task: OperationTask::RangeClip { path, start, end },
+        },
+        OperationAction::Recover { id } => OperationRequest {
+            job_id: id,
+            source_path: None,
+            task: OperationTask::Recover,
+        },
+        OperationAction::Cleanup { id, file } => OperationRequest {
+            job_id: id,
+            source_path: None,
+            task: OperationTask::Cleanup { files: file },
+        },
+        OperationAction::Download {
+            remote_name,
+            id,
+            path,
+        } => OperationRequest {
+            job_id: id,
+            source_path: None,
+            task: OperationTask::Download {
+                remote: remote_name,
+                path,
+            },
+        },
+    };
+    request.task.validate()?;
+    print_json(&client.post::<Value>("/operations", &vec![request]).await?)
 }
 
 #[cfg(test)]

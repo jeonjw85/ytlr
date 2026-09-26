@@ -21,6 +21,9 @@ pub async fn run(state: Arc<Service>) {
         };
         let policy = settings.automation.retention;
         for job in jobs {
+            if state.store.job_has_operations(&job.id).unwrap_or(true) {
+                continue;
+            }
             if state.shutdown.is_cancelled() {
                 return;
             }

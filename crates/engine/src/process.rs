@@ -131,19 +131,8 @@ pub async fn worker(spec: WorkerSpec) -> Result<i32> {
         .kill_on_drop(true);
     group(&mut command);
     let mut child = command.spawn().context("수집 프로세스 시작 실패")?;
-    #[cfg(target_os = "macos")]
-    let _sleep_guard = if let Some(id) = child.id() {
-        Command::new("/usr/bin/caffeinate")
-            .args(["-i", "-w", &id.to_string()])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .ok()
-    } else {
-        None
-    };
+    // Sleep prevention is managed by the service for all platforms so preference
+    // changes apply immediately to both capture and background media work.
     let mut stdin = tokio::io::stdin();
     let mut buf = [0u8; 1];
     tokio::select! {

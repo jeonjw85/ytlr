@@ -16,9 +16,11 @@ fn compatible(endpoint: &ServiceEndpoint) -> bool {
 
 fn version_mismatch(endpoint: &ServiceEndpoint) -> anyhow::Error {
     anyhow::anyhow!(
-        "실행 중인 서비스 버전({})과 앱 버전({})이 다릅니다. 녹화를 마무리하고 `ytlr shutdown` 후 다시 실행하세요.",
+        "실행 중인 서비스 버전({} / API {})과 앱 버전({} / API {})이 다릅니다. 녹화를 마무리하고 `ytlr shutdown` 후 다시 실행하세요.",
         endpoint.version,
-        env!("CARGO_PKG_VERSION")
+        endpoint.api_version,
+        env!("CARGO_PKG_VERSION"),
+        SERVICE_API_VERSION
     )
 }
 
@@ -46,6 +48,42 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn endpoint_info(&self) -> Result<ServiceEndpoint> {
+        self.endpoint
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| self.paths.endpoint())
+    }
+    pub async fn file_chunk(&self, job: &str, body: &impl Serialize) -> Result<Vec<u8>> {
+        let endpoint = self.endpoint_info()?;
+        if !compatible(&endpoint) {
+            return Err(version_mismatch(&endpoint));
+        }
+        let response = self
+            .http
+            .post(format!(
+                "http://127.0.0.1:{}/jobs/{job}/file-chunk",
+                endpoint.port
+            ))
+            .bearer_auth(endpoint.token)
+            .header("x-ytlr-api-version", SERVICE_API_VERSION.to_string())
+            .json(body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            decode_json(response).await?;
+            bail!("파일 전송 실패");
+        }
+        let mut response = response;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len() + chunk.len() > 1024 * 1024 {
+                bail!("파일 전송 응답 크기 오류");
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
     pub fn new(paths: AppPaths) -> Result<Self> {
         Ok(Self {
             paths,
@@ -91,7 +129,10 @@ impl Client {
             .bearer_auth(endpoint.token)
             .header("x-ytlr-api-version", SERVICE_API_VERSION.to_string());
         if path.starts_with("/jobs/")
-            && (path.contains("/cleanup") || path.ends_with("/clip") || path.contains("/export"))
+            && (path.contains("/cleanup")
+                || path.ends_with("/clip")
+                || path.contains("/export")
+                || path.ends_with("/file-info"))
         {
             request = request.timeout(Duration::from_secs(3600));
         }

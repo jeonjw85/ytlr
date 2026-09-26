@@ -115,6 +115,13 @@ fn prepare_parent(root: &Path, relative: &Path) -> Result<PathBuf> {
 }
 
 pub fn file_digest(path: &Path) -> Result<(u64, String)> {
+    file_digest_with_progress(path, |_| Ok(()))
+}
+
+pub fn file_digest_with_progress(
+    path: &Path,
+    mut progress: impl FnMut(u64) -> Result<()>,
+) -> Result<(u64, String)> {
     if !fs::symlink_metadata(path)?.is_file() {
         bail!("일반 파일만 백업할 수 있습니다.");
     }
@@ -129,6 +136,7 @@ pub fn file_digest(path: &Path) -> Result<(u64, String)> {
         }
         hasher.update(&buffer[..n]);
         length += n as u64;
+        progress(length)?;
     }
     Ok((length, hex::encode(hasher.finalize())))
 }

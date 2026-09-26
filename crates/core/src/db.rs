@@ -21,6 +21,9 @@ impl Store {
             CREATE TABLE IF NOT EXISTS automatic_runs (key TEXT PRIMARY KEY, job_id TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS notification_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, target TEXT NOT NULL, body TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, error TEXT);
             CREATE TABLE IF NOT EXISTS maintenance_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, job_id TEXT NOT NULL, message TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS channel_events (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS configuration_imports (key TEXT PRIMARY KEY, job_id TEXT NOT NULL);
             PRAGMA user_version=1;")?;
         conn.execute(
             "INSERT OR IGNORE INTO settings VALUES(1, ?)",
@@ -134,7 +137,7 @@ impl Store {
         request.schedule.validate(stop_at.as_deref())?;
         let mut schedule = request.schedule.clone();
         schedule.start_at = normalize_stop_at(schedule.start_at.as_deref())?;
-        let (url, video_id) = video_url(&request.url)?;
+        let (_, video_id) = video_url(&request.url)?;
         let settings = self.settings()?;
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
@@ -207,47 +210,7 @@ impl Store {
             tx.commit()?;
             return Ok(job);
         }
-        let id = uuid::Uuid::new_v4().to_string();
-        let at = now();
-        let job = RecordingJob {
-            schedule,
-            protected: false,
-            finished_at: None,
-            stop_at,
-            bookmarks: vec![],
-            alerts: vec![],
-            recovery_error: None,
-            recording_options: request.recording_options.clone(),
-            output_dir: settings.storage_root.join(format!("{video_id}_{id}")),
-            id,
-            url,
-            video_id,
-            title: "방송 정보 확인 대기".into(),
-            channel: String::new(),
-            channel_id,
-            state: JobState::Queued,
-            message: "녹화 대기".into(),
-            created_at: at.clone(),
-            updated_at: at,
-            started_at: None,
-            last_media_at: None,
-            format: String::new(),
-            resolution: None,
-            bytes: 0,
-            media_seconds: 0.0,
-            attempt: 0,
-            retries: 0,
-            priority: request.priority,
-            live_from_start: request.live_from_start.unwrap_or(settings.live_from_start),
-            continuity_uncertain: false,
-            stop_requested: false,
-            outputs: vec![],
-            attempts: vec![],
-            gaps: vec![],
-            backup: BackupStatus::default(),
-            replica: None,
-            replica_origin: key.is_some(),
-        };
+        let job = new_recording_job(request, &settings, channel_id, key.is_some())?;
         tx.execute(
             "INSERT INTO jobs VALUES(?,?,?)",
             params![job.id, job.video_id, serde_json::to_string(&job)?],
@@ -473,6 +436,7 @@ impl Store {
             return Ok(channel);
         }
         let channel = Channel {
+            health: ChannelHealth::default(),
             rules: ChannelRules::default(),
             decisions: vec![],
             recording_options: req.recording_options.clone(),
@@ -499,8 +463,8 @@ impl Store {
         channel.rules.validate()?;
         channel.recording_options.validate()?;
         let count = self.lock()?.execute(
-            "UPDATE channels SET body=? WHERE id=?",
-            params![serde_json::to_string(channel)?, channel.id],
+            "UPDATE channels SET url=?,body=? WHERE id=?",
+            params![channel.url, serde_json::to_string(channel)?, channel.id],
         )?;
         if count == 0 {
             bail!("채널을 찾을 수 없습니다.");

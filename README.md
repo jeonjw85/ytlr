@@ -184,6 +184,67 @@ Use `--data-dir PATH` or `YTLR_HOME` to run an isolated data and service
 instance. The macOS app bundle includes the CLI at
 `YTLR.app/Contents/MacOS/ytlr`.
 
+## Monitoring and background tasks
+
+Channel monitoring shows the last successful check, consecutive failures, and an error category.
+Three consecutive failures open an incident; the next successful scan resolves it. Transitions and
+external notifications are committed together and survive restarts. Desktop notifications follow
+the app preference and permission. **Notification connections and history** in Settings checks saved
+environment variables, sends test notifications, and shows delivery failures and retries. Check it
+after enabling login startup, whose environment may differ from a terminal session.
+
+**Startup** can register the app/local service at login, optionally minimized to the tray. It is off
+by default. Sleep prevention during recording and file processing is enabled by default, using
+`caffeinate` on macOS, a Windows execution-state request, or `systemd-inhibit` on Linux. Unavailable
+inhibition is shown in the UI. Keeping awake for schedules and monitored channels is optional.
+Transfers briefly extend the active period. The computer must be powered on; forced sleep is not overridden.
+
+The **Tasks** page manages app-requested exports, clips, previews, recovery, and cleanup. Requests
+are saved in SQLite and continue with the app closed. Limits: 100 requests per batch and 1000 unfinished
+tasks. Restarted work revalidates sources and output receipts. Ambiguous files are preserved under
+their original names. Encoding restarts; downloads resume. Bookmark clip positions are resolved when
+queued. Pending tasks can be cancelled, as can running exports, previews, and downloads. Destructive
+cleanup and recovery finish their critical work. Failed/cancelled tasks can be retried. Indeterminate
+stages show their activity. Retention defers recordings referenced by unfinished tasks.
+
+## Configuration backup, previews, and remote downloads
+
+Export channel rules, pending manual schedules, and shared settings as JSON. Preview an import,
+choose a storage root, and skip or replace matching channels. Duplicate and expired schedules are
+skipped; DB changes are atomic. Limits: 4 MiB per input file, 1000 channels, and 1000 schedules.
+Authentication files, backup volume identities, and SSH connections remain device-specific.
+Imported channels rediscover their automatic recordings.
+
+Completed recordings offer an H.264/AAC MP4 preview (AAC for audio-only recordings), bookmark seeking,
+and visual clip range selection. Original media is retained; previews use additional disk space.
+Remote files are transferred through the authenticated SSH tunnel to `downloads` under the local
+storage root. In remote mode, see **Downloads on this computer** in Tasks. Resuming requires the
+same source size and SHA-256; final bytes are verified before publication. Corrupt transfers reset
+for a fresh retry. A changed remote source requires a new download task.
+
+```sh
+ytlr channel events CHANNEL_ID
+ytlr notifications --test TARGET_ID
+ytlr settings --prevent-sleep true --keep-awake-waiting true
+ytlr operation list
+ytlr operation export JOB_ID --index 0
+ytlr operation recover JOB_ID
+ytlr operation cleanup JOB_ID --file attempt-0001/part-000000.mkv
+ytlr operation cancel OPERATION_ID
+ytlr operation retry OPERATION_ID
+ytlr config-export settings.json
+ytlr config-import settings.json --storage /data/recordings
+ytlr config-import settings.json --storage /data/recordings --replace-channels --settings --apply
+ytlr --remote studio files JOB_ID
+ytlr operation download studio JOB_ID attempt-0001/recording-OUTPUT_ID.mkv
+ytlr operation preview JOB_ID attempt-0001/recording-OUTPUT_ID.mkv
+ytlr operation clip JOB_ID attempt-0001/recording-OUTPUT_ID.mkv --start 30 --end 60
+```
+
+`operation queue FILE` accepts an array such as
+`[{"job_id":"JOB_ID","task":{"kind":"export","index":0}}]`.
+The existing synchronous `export`, `clip`, and `cleanup` commands remain available.
+
 ## Recording Semantics
 
 The default is **Video + audio / Best quality**. In the desktop recording
@@ -341,9 +402,11 @@ results are not automatically merged.
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo build -p ytlr
 pnpm check
 pnpm test
 pnpm test:integration
+pnpm test:operations
 pnpm test:ui
 pnpm test:remote
 ```
@@ -362,7 +425,7 @@ and platform-specific signing still require field validation.
 
 ## Automation and library tools
 
-These features use service API 3. Finish current recordings, run `ytlr shutdown`, and restart
+These features use service API 4. Finish current recordings, run `ytlr shutdown`, and restart
 with the updated service. Update remote services as well; incompatible services reject requests.
 
 - **Channel rules:** edit include/exclude title keywords in channel recording options. Matching is

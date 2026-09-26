@@ -36,6 +36,8 @@ jobs:
       - if: runner.os != 'Windows'
         run: pnpm test:integration
       - if: runner.os != 'Windows'
+        run: pnpm test:operations
+      - if: runner.os != 'Windows'
         run: cargo test -p ytlr-engine --test recovery -- --ignored
       - if: runner.os == 'macOS'
         run: pnpm test:remote

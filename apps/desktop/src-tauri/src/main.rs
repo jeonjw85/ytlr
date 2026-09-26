@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod desktop_tools;
 mod updates;
 
 use std::{
@@ -261,7 +262,10 @@ fn connection(bridge: State<'_, Bridge>) -> Result<String, String> {
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if args.iter().any(|arg| arg == "--autostart") {
+                return;
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -271,6 +275,12 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("YTLR")
+                .args(["--autostart"])
+                .build(),
+        )
         .setup(|app| {
             let paths = AppPaths::resolve(None)?;
             let name = if cfg!(windows) { "ytlr.exe" } else { "ytlr" };
@@ -292,6 +302,7 @@ fn main() {
                 session: Mutex::new(Session::default()),
             });
             updates::setup(app.handle());
+            desktop_tools::setup(app.handle());
             use tauri::menu::{Menu, MenuItem};
             let show = MenuItem::with_id(app, "show", "Open YTLR", true, None::<&str>)?;
             let quit =
@@ -352,7 +363,16 @@ fn main() {
             updates::set_update_preferences,
             updates::check_app_update,
             updates::install_app_update,
-            updates::open_update_releases
+            updates::open_update_releases,
+            desktop_tools::startup_status,
+            desktop_tools::set_startup,
+            desktop_tools::load_configuration,
+            desktop_tools::save_configuration,
+            desktop_tools::media_url,
+            desktop_tools::queue_download,
+            desktop_tools::local_downloads,
+            desktop_tools::download_action,
+            desktop_tools::open_operation
         ])
         .build(tauri::generate_context!())
         .expect("데스크톱 앱 실행 실패")

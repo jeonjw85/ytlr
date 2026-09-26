@@ -98,7 +98,7 @@ pub async fn connect(remote: &Remote) -> Result<Tunnel> {
     command
         .args(options(remote)?)
         .args([
-            "-N",
+            "-T",
             "-o",
             "ExitOnForwardFailure=yes",
             "-L",
@@ -106,7 +106,10 @@ pub async fn connect(remote: &Remote) -> Result<Tunnel> {
         ])
         .arg("--")
         .arg(target(remote)?)
-        .stdin(Stdio::null())
+        // Keep a remote stdin reader alive for the duration of the tunnel. If the
+        // local service is killed, EOF ends the remote command and the SSH session.
+        .arg("exec cat >/dev/null")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);

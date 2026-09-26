@@ -8,6 +8,7 @@ import {
   type Job,
   type Bookmark,
   type CleanupPlan,
+  type Operation,
 } from "./types";
 
 export interface DeadlineDraft {
@@ -358,9 +359,11 @@ const categoryLabels: Record<string, string> = {
 
 export function JobCleanup({
   job,
+  operations,
   onChanged,
 }: {
   job: Job;
+  operations: Operation[];
   onChanged: () => Promise<void>;
 }) {
   const { t } = useI18n();
@@ -375,6 +378,34 @@ export function JobCleanup({
     completed: boolean;
     warnings: string[];
   } | null>(null);
+  const [queued, setQueued] = useState(false);
+  const latest = operations.find(
+    (o) => o.request.job_id === job.id && o.request.task.kind === "cleanup",
+  );
+  useEffect(() => {
+    if (
+      latest &&
+      ["completed", "failed"].includes(latest.state) &&
+      latest.result
+    ) {
+      const r = latest.result as {
+        reclaimed_bytes?: number;
+        pending_files?: string[];
+        completed?: boolean;
+        warnings?: string[];
+      };
+      setResult({
+        reclaimed_bytes: r.reclaimed_bytes ?? 0,
+        pending_files: r.pending_files ?? [],
+        completed: r.completed ?? true,
+        warnings: r.warnings ?? [],
+      });
+      setQueued(false);
+      void api<Record<string, number>>(`/jobs/${job.id}/storage`)
+        .then(setSizes)
+        .catch((e) => setError(String(e)));
+    }
+  }, [job.id, latest?.id, latest?.state]);
   useEffect(() => {
     let live = true;
     void api<Record<string, number>>(`/jobs/${job.id}/storage`)
@@ -489,18 +520,15 @@ export function JobCleanup({
                 setBusy(true);
                 setError("");
                 try {
-                  const cleanup = await api<{
-                    reclaimed_bytes: number;
-                    pending_files: string[];
-                    completed: boolean;
-                    warnings: string[];
-                  }>(`/jobs/${job.id}/cleanup`, "POST", {
-                    plan_id: plan.id,
-                    files: [...selected],
-                  });
+                  await api("/operations", "POST", [
+                    {
+                      job_id: job.id,
+                      task: { kind: "cleanup", files: [...selected] },
+                    },
+                  ]);
                   setPlan(null);
-                  setResult(cleanup);
-                  setSizes(await api(`/jobs/${job.id}/storage`));
+                  setResult(null);
+                  setQueued(true);
                   await onChanged();
                 } catch (error) {
                   setError(String(error));
@@ -519,15 +547,21 @@ export function JobCleanup({
           {t(error)}
         </p>
       )}
+      {queued && <p role="status">{t("작업 목록에 추가했습니다.")}</p>}
       {result && (
         <div
           className={result.completed ? "inline-success" : "inline-error"}
           role={result.completed ? "status" : "alert"}
         >
           <p>
-            {t(result.completed ? "정리 완료 · 회수 용량 {size}" : "정리 일부 완료 · 회수 용량 {size}", {
-              size: bytes(result.reclaimed_bytes),
-            })}
+            {t(
+              result.completed
+                ? "정리 완료 · 회수 용량 {size}"
+                : "정리 일부 완료 · 회수 용량 {size}",
+              {
+                size: bytes(result.reclaimed_bytes),
+              },
+            )}
           </p>
           {!!result.pending_files.length && (
             <>

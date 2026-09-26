@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -22,11 +22,14 @@ const noUpdates = {
 
 test.beforeAll(async () => {
   const home = await mkdtemp(join(tmpdir(), "ytlr-ui-"));
-  daemon = spawn(
-    resolve("target/debug/ytlr"),
-    ["--data-dir", home, "run", "--headless"],
-    { stdio: "ignore" },
+  const cli = join(home, process.platform === "win32" ? "ytlr.exe" : "ytlr");
+  await copyFile(
+    resolve(`target/debug/ytlr${process.platform === "win32" ? ".exe" : ""}`),
+    cli,
   );
+  daemon = spawn(cli, ["--data-dir", home, "run", "--headless"], {
+    stdio: "ignore",
+  });
   for (let i = 0; i < 150; i++) {
     try {
       endpoint = JSON.parse(await readFile(join(home, "service.json"), "utf8"));
@@ -80,6 +83,8 @@ test("GUI persists language and controls the real Rust service: create, deduplic
         return null;
       }
       if (command === "update_status") return noUpdates;
+      if (command === "startup_status")
+        return { enabled: false, start_hidden: false };
       if (command === "list_remotes")
         return [
           {
@@ -359,6 +364,7 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
     ...base,
     jobs: [job],
     channels: [],
+    operations: [] as any[],
     storage: [],
     settings: { ...base.settings, notifications: true },
   };
@@ -386,6 +392,8 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
     async (command: string, args: any) => {
       if (command === "set_ui_language" || command === "open_job") return null;
       if (command === "update_status") return noUpdates;
+      if (command === "startup_status")
+        return { enabled: false, start_hidden: false };
       if (command === "list_remotes") return [];
       if (command.includes("is_permission_granted")) return true;
       if (command.includes("notify")) {
@@ -395,6 +403,46 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
       if (command === "api") {
         if (args.path === "/snapshot") return snapshot;
         if (args.path.endsWith("/events")) return [];
+        if (args.path.endsWith("/files")) return [];
+        if (args.path === "/operations" && args.method === "POST") {
+          const ops = args.body.map((request: any) => {
+            let result: any = { path: "/fixture/export.mp4" };
+            if (request.task.kind === "clip") {
+              clipRequests.push(request.task.request);
+              result = { path: "/fixture/clip.mp4" };
+            }
+            if (request.task.kind === "export")
+              exportRequests.push({ index: request.task.index });
+            if (request.task.kind === "cleanup") {
+              cleanupRequests.push({ files: request.task.files });
+              result = {
+                reclaimed_bytes: 1000,
+                pending_files: [
+                  "attempt-0002/.cleanup-plan-1-part-002.mkv.pending",
+                ],
+                completed: false,
+                warnings: [],
+              };
+            }
+            return {
+              id: `op-${snapshot.operations.length}-${Math.random()}`,
+              request,
+              state: "completed",
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              attempts: 1,
+              cancel_requested: false,
+              progress: 1,
+              bytes_done: 1000,
+              total_bytes: 1000,
+              message: "작업 완료",
+              error: null,
+              result,
+            };
+          });
+          snapshot.operations.unshift(...ops);
+          return ops;
+        }
         if (args.path.endsWith("/clip")) {
           clipRequests.push(args.body);
           return { path: "/fixture/clip.mp4" };
@@ -528,7 +576,7 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
     after_seconds: 5,
   });
   await expect(
-    page.getByText("Export complete: /fixture/clip.mp4", { exact: true }),
+    page.getByText("Added to the task queue.", { exact: true }),
   ).toBeVisible();
   await page
     .getByRole("button", { name: "Preview cleanup", exact: true })
@@ -546,7 +594,6 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
     .click();
   await expect.poll(() => cleanupRequests.length).toBe(1);
   expect(cleanupRequests[0]).toEqual({
-    plan_id: "plan-1",
     files: ["attempt-0002/part-001.mkv"],
   });
   await expect(
@@ -567,7 +614,7 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
     .click();
   await expect.poll(() => exportRequests.length).toBe(1);
   await expect(
-    page.getByText("UI live fixture: Export complete (1)", { exact: true }),
+    page.getByText("Added to the task queue.", { exact: true }),
   ).toBeVisible();
   await page
     .getByRole("button", { name: "Preview selected cleanup", exact: true })
@@ -576,6 +623,8 @@ test("bookmark editing, selected cleanup, and deduplicated recovery notification
     .getByRole("button", { name: "Clean previewed files", exact: true })
     .click();
   await expect.poll(() => cleanupRequests.length).toBe(2);
-  expect(cleanupRequests[1]).toEqual({ plan_id: "plan-1", all: true });
+  expect(cleanupRequests[1]).toEqual({
+    files: ["attempt-0002/part-001.mkv", "attempt-0002/part-002.mkv"],
+  });
   expect(errors).toEqual([]);
 });

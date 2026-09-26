@@ -1,6 +1,8 @@
 import { automationEnglish } from "./automation.en";
+import { toolsEnglish } from "./tools.en";
 
 export const english: Record<string, string> = {
+  ...toolsEnglish,
   "앱 업데이트": "App updates",
   "새 버전을 확인할 수 있습니다.": "Ready to check for updates.",
   "업데이트 확인 중…": "Checking for updates…",

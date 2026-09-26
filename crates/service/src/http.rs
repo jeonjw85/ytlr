@@ -16,7 +16,7 @@ use std::{
 };
 use ytlr_core::*;
 
-struct ApiError(anyhow::Error);
+pub(crate) struct ApiError(pub(crate) anyhow::Error);
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(e: E) -> Self {
         Self(e.into())
@@ -31,7 +31,7 @@ impl IntoResponse for ApiError {
             .into_response()
     }
 }
-type ApiResult<T> = Result<Json<T>, ApiError>;
+pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
 
 pub fn router(state: Arc<Service>) -> Router {
     Router::new()
@@ -40,6 +40,14 @@ pub fn router(state: Arc<Service>) -> Router {
             get(|| async { Json(json!({"ok":true,"version":env!("CARGO_PKG_VERSION")})) }),
         )
         .route("/snapshot", get(snapshot))
+        .route(
+            "/operations",
+            get(crate::operations::list)
+                .post(crate::operations::enqueue)
+                .layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
+        )
+        .route("/operations/{id}/cancel", post(crate::operations::cancel))
+        .route("/operations/{id}/retry", post(crate::operations::retry))
         .route("/jobs", post(record))
         .route("/jobs/{id}", delete(delete_job))
         .route("/jobs/{id}/stop", post(stop))
@@ -47,6 +55,11 @@ pub fn router(state: Arc<Service>) -> Router {
         .route("/jobs/{id}/recover", post(recover))
         .route("/jobs/{id}/export", post(export))
         .route("/jobs/{id}/events", get(events))
+        .route("/jobs/{id}/files", get(crate::files::catalog))
+        .route("/jobs/{id}/file-info", post(crate::files::info))
+        .route("/jobs/{id}/file-chunk", post(crate::files::chunk))
+        .route("/jobs/{id}/preview-ticket", post(crate::files::ticket))
+        .route("/play/{ticket}", get(crate::files::play))
         .route("/jobs/{id}/schedule", put(schedule))
         .route("/jobs/{id}/start-schedule", put(start_schedule))
         .route("/jobs/{id}/protect", put(protect))
@@ -55,6 +68,9 @@ pub fn router(state: Arc<Service>) -> Router {
         .route("/rules/preview", post(rule_preview))
         .route("/notifications", get(notification_status))
         .route("/notifications/{id}/retry", post(notification_retry))
+        .route("/notifications/targets", get(notification_targets))
+        .route("/notifications/test/{id}", post(notification_test))
+        .route("/notifications/test", post(notification_test_body))
         .route("/maintenance", get(maintenance_status))
         .route("/jobs/{id}/bookmarks", post(bookmark_add))
         .route(
@@ -69,7 +85,17 @@ pub fn router(state: Arc<Service>) -> Router {
         )
         .route("/channels", post(channel_add))
         .route("/channels/{id}", put(channel_update).delete(channel_delete))
+        .route("/channels/{id}/events", get(channel_events))
         .route("/settings", put(settings))
+        .route("/configuration/export", get(configuration_export))
+        .route(
+            "/configuration/preview",
+            post(configuration_preview).layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
+        )
+        .route(
+            "/configuration/import",
+            post(configuration_import).layer(DefaultBodyLimit::max(4 * 1024 * 1024)),
+        )
         .route("/tools/install", post(install))
         .route("/tools/rollback", post(rollback))
         .route("/tools/refresh", post(refresh))
@@ -93,6 +119,9 @@ pub fn router(state: Arc<Service>) -> Router {
 }
 
 async fn authorize(State(state): State<Arc<Service>>, req: Request, next: Next) -> Response {
+    if req.uri().path().starts_with("/play/") && matches!(req.method().as_str(), "GET" | "HEAD") {
+        return next.run(req).await;
+    }
     // No browser CORS: only the native GUI bridge/CLI can call this loopback API.
     let public_compatibility_path = matches!(req.uri().path(), "/health" | "/shutdown");
     let wrong_api_version = !public_compatibility_path
@@ -169,6 +198,9 @@ pub(crate) async fn delete_job_impl(
             anyhow::bail!("진행 중인 녹화는 삭제할 수 없습니다.");
         }
         let job = s.store.job(&id)?;
+        if s.store.job_has_operations(&id)? {
+            anyhow::bail!("관련 백그라운드 작업이 대기 중입니다. 먼저 취소하거나 완료해 주세요.");
+        }
         if job.protected {
             anyhow::bail!("중요 녹화 보호를 해제한 뒤 삭제하세요.");
         }
@@ -289,6 +321,57 @@ async fn maintenance_status(State(s): State<Arc<Service>>) -> ApiResult<Vec<Valu
     Ok(Json(s.store.maintenance_events()?))
 }
 
+async fn channel_events(
+    State(s): State<Arc<Service>>,
+    Path(id): Path<String>,
+) -> ApiResult<Vec<Value>> {
+    Ok(Json(s.store.channel_events(&id)?))
+}
+async fn configuration_export(State(s): State<Arc<Service>>) -> ApiResult<ConfigurationBundle> {
+    Ok(Json(s.store.export_configuration()?))
+}
+async fn configuration_preview(
+    State(s): State<Arc<Service>>,
+    Json(req): Json<ConfigurationImport>,
+) -> ApiResult<ImportReport> {
+    Ok(Json(s.store.import_configuration(&req, true)?))
+}
+async fn configuration_import(
+    State(s): State<Arc<Service>>,
+    Json(req): Json<ConfigurationImport>,
+) -> ApiResult<ImportReport> {
+    let _active = s.active.lock().await;
+    let report = s.store.import_configuration(&req, true)?;
+    ensure_storage(&report.storage_root, 0)?;
+    let result = s.store.import_configuration(&req, false)?;
+    Ok(Json(result))
+}
+async fn notification_test(
+    State(s): State<Arc<Service>>,
+    Path(id): Path<String>,
+) -> ApiResult<Value> {
+    Ok(Json(json!({"delivery_id":s.store.test_notification(&id)?})))
+}
+
+#[derive(Deserialize)]
+struct NotificationTestRequest {
+    target_id: String,
+}
+async fn notification_test_body(
+    State(s): State<Arc<Service>>,
+    Json(req): Json<NotificationTestRequest>,
+) -> ApiResult<Value> {
+    Ok(Json(
+        json!({"delivery_id":s.store.test_notification(&req.target_id)?}),
+    ))
+}
+async fn notification_targets(State(s): State<Arc<Service>>) -> ApiResult<Vec<Value>> {
+    Ok(Json(s.store.settings()?.automation.notifications.iter().map(|target| {
+        let (kind,variable)=match target { NotificationTarget::Webhook{url_env,..} => ("webhook",url_env),NotificationTarget::Discord{url_env,..} => ("discord",url_env),NotificationTarget::Telegram{token_env,..} => ("telegram",token_env) };
+        json!({"id":target.id(),"kind":kind,"configured":std::env::var(variable).is_ok_and(|v|!v.trim().is_empty())})
+    }).collect()))
+}
+
 pub(crate) async fn automatic_cleanup(s: Arc<Service>, id: String) -> anyhow::Result<Value> {
     let plan = cleanup_job(s.clone(), id.clone(), None, true)
         .await
@@ -317,6 +400,81 @@ pub(crate) async fn automatic_cleanup(s: Arc<Service>, id: String) -> anyhow::Re
     .await
     .map(|j| j.0)
     .map_err(|e| e.0)
+}
+
+pub(crate) async fn queued_cleanup(
+    s: Arc<Service>,
+    id: String,
+    selected: Vec<String>,
+) -> anyhow::Result<Value> {
+    let plan: ytlr_engine::cleanup::CleanupPlan = serde_json::from_value(
+        cleanup_job(s.clone(), id.clone(), None, false)
+            .await
+            .map_err(|e| e.0)?
+            .0,
+    )?;
+    let job = s.store.job(&id)?;
+    let mut files = vec![];
+    for path in selected {
+        let relative = std::path::PathBuf::from(&path);
+        if plan.files.iter().any(|f| f.path == relative) {
+            files.push(relative);
+        } else if job.output_dir.join(&path).exists() {
+            anyhow::bail!("선택한 파일의 정리 조건이 변경되었습니다. 새 미리보기를 확인하세요.");
+        }
+    }
+    if files.is_empty() {
+        return Ok(json!({"completed":true,"reclaimed_bytes":0}));
+    }
+    cleanup_job(
+        s,
+        id,
+        Some(ytlr_engine::cleanup::CleanupRequest {
+            plan_id: plan.id,
+            all: false,
+            files,
+        }),
+        false,
+    )
+    .await
+    .map(|v| v.0)
+    .map_err(|e| e.0)
+}
+pub(crate) async fn queued_recovery(s: Arc<Service>, id: String) -> anyhow::Result<Value> {
+    {
+        let mut active = s.active.lock().await;
+        if active.contains_key(&id) || s.shutdown.is_cancelled() {
+            anyhow::bail!("파일 처리 중입니다.");
+        }
+        let job = s.store.job(&id)?;
+        if job.attempt == 0 {
+            anyhow::bail!("복구할 원본이 없습니다.");
+        }
+        s.store.update_job(&id, |j| {
+            j.stop_requested = false;
+            j.stop_at = None;
+            j.schedule = RecordingSchedule::default();
+            j.state = JobState::Finalizing;
+        })?;
+        active.insert(id.clone(), s.shutdown.child_token());
+    }
+    let result = scheduler::finish(&s, &id, false).await;
+    if let Err(e) = &result {
+        let _ = s.store.update_job(&id, |j| {
+            j.state = JobState::Partial;
+            j.recovery_error = Some(redact(&e.to_string()));
+        });
+    }
+    s.active.lock().await.remove(&id);
+    result?;
+    let recovered = s.store.job(&id)?;
+    if recovered.outputs.is_empty() {
+        anyhow::bail!("재생 가능한 결과를 복구하지 못했습니다. 원본은 보존됩니다.");
+    }
+    if let Some(error) = recovered.recovery_error {
+        anyhow::bail!("일부 복구가 완료되지 않았습니다: {error}");
+    }
+    Ok(json!({"outputs":recovered.outputs}))
 }
 
 async fn clip(
@@ -615,6 +773,9 @@ async fn stop(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResul
 }
 async fn retry(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<RecordingJob> {
     let active = s.active.lock().await;
+    if s.store.job_has_operations(&id)? {
+        return Err(anyhow::anyhow!("대기 중인 파일 작업을 먼저 완료하거나 취소하세요.").into());
+    }
     if active.contains_key(&id) {
         return Err(anyhow::anyhow!("작업이 실행 중입니다.").into());
     }
@@ -633,6 +794,9 @@ async fn retry(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResu
 }
 async fn recover(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<Value> {
     let mut active = s.active.lock().await;
+    if s.store.job_has_operations(&id)? {
+        return Err(anyhow::anyhow!("대기 중인 파일 작업을 먼저 완료하거나 취소하세요.").into());
+    }
     if s.shutdown.is_cancelled() || active.contains_key(&id) {
         return Err(anyhow::anyhow!("진행 중인 녹화를 먼저 중지하세요.").into());
     }
@@ -752,7 +916,7 @@ async fn settings(
 }
 async fn install(State(s): State<Arc<Service>>) -> ApiResult<Value> {
     let active = s.active.lock().await;
-    if s.shutdown.is_cancelled() || !active.is_empty() {
+    if s.shutdown.is_cancelled() || !active.is_empty() || !s.op_active.lock().await.is_empty() {
         return Err(anyhow::anyhow!("진행 중인 작업이 끝난 후 엔진을 설치할 수 있습니다.").into());
     }
     if s.installing.swap(true, Ordering::SeqCst) {
@@ -784,7 +948,10 @@ async fn install(State(s): State<Arc<Service>>) -> ApiResult<Value> {
 }
 async fn rollback(State(s): State<Arc<Service>>) -> ApiResult<Value> {
     let active = s.active.lock().await;
-    if !active.is_empty() || s.installing.load(Ordering::SeqCst) {
+    if !active.is_empty()
+        || !s.op_active.lock().await.is_empty()
+        || s.installing.load(Ordering::SeqCst)
+    {
         return Err(anyhow::anyhow!("작업 또는 설치가 진행 중입니다.").into());
     }
     s.tools.rollback()?;
@@ -805,6 +972,7 @@ async fn shutdown_idle(State(s): State<Arc<Service>>) -> ApiResult<Value> {
     // would race a newly-started recording. Queued schedules remain persisted.
     let active = s.active.lock().await;
     if !active.is_empty()
+        || !s.op_active.lock().await.is_empty()
         || s.installing.load(Ordering::SeqCst)
         || s.store.jobs()?.iter().any(|j| j.state.active())
     {
@@ -834,6 +1002,10 @@ mod tests {
         let store = Arc::new(Store::open(&paths.database(), &paths.default_settings()).unwrap());
         (
             Arc::new(Service {
+                file_activity: std::sync::Mutex::new(None),
+                playback: Mutex::new(HashMap::new()),
+                power: RwLock::new(PowerStatus::default()),
+                op_active: Mutex::new(HashMap::new()),
                 storage: RwLock::new(vec![]),
                 tools: Tools::new(paths.clone()),
                 store,
@@ -880,7 +1052,7 @@ mod tests {
         state: Arc<Service>,
         method: &str,
         uri: &str,
-        body: &'static str,
+        body: &str,
     ) -> (StatusCode, String) {
         let response = router(state)
             .oneshot(
@@ -890,7 +1062,7 @@ mod tests {
                     .header("authorization", "Bearer test-token")
                     .header("x-ytlr-api-version", SERVICE_API_VERSION)
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(body))
+                    .body(axum::body::Body::from(body.to_owned()))
                     .unwrap(),
             )
             .await
@@ -921,6 +1093,65 @@ mod tests {
         let (status, body) = send(state, "DELETE", "/jobs/missing/extra", "{}").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.contains("error"));
+    }
+
+    #[tokio::test]
+    async fn queued_bookmark_clips_snapshot_their_source_and_range() {
+        let (state, _d) = service();
+        let job = completed_job(&state);
+        state
+            .store
+            .update_job(&job.id, |j| {
+                j.outputs = vec![MediaOutput {
+                    path: j.output_dir.join("attempt-0001/recording.mkv"),
+                    bytes: 100,
+                    duration: 60.0,
+                    has_video: true,
+                    has_audio: true,
+                    verification: "container_probe".into(),
+                    sha256: None,
+                }];
+                j.bookmarks = vec![Bookmark {
+                    id: "mark".into(),
+                    title: "Mark".into(),
+                    note: String::new(),
+                    attempt: 1,
+                    media_seconds: Some(20.0),
+                    created_at: now(),
+                    received_at: now(),
+                }];
+            })
+            .unwrap();
+        let body=json!([{ "job_id":job.id,"task":{"kind":"clip","request":{"bookmark_id":"mark","before_seconds":5,"after_seconds":10}} }]).to_string();
+        assert_eq!(
+            send(state.clone(), "POST", "/operations", &body).await.0,
+            StatusCode::OK
+        );
+        state.store.edit_bookmark(&job.id, "mark", None).unwrap();
+        let op = state.store.operations().unwrap().remove(0);
+        assert_eq!(
+            send(
+                state.clone(),
+                "POST",
+                &format!("/jobs/{}/retry", job.id),
+                "{}"
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(matches!(
+            op.request.task,
+            OperationTask::RangeClip {
+                start: 15.0,
+                end: 30.0,
+                ..
+            }
+        ));
+        assert_eq!(
+            op.request.source_path.as_deref(),
+            Some("attempt-0001/recording.mkv")
+        );
     }
 
     #[tokio::test]

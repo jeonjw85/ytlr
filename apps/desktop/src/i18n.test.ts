@@ -6,6 +6,11 @@ import automationSource from "./Automation.tsx?raw";
 import librarySource from "./Library.tsx?raw";
 import clipsSource from "./Clips.tsx?raw";
 import updatesSource from "./AppUpdates.tsx?raw";
+import operationsSource from "./Operations.tsx?raw";
+import startupSource from "./Startup.tsx?raw";
+import configurationSource from "./Configuration.tsx?raw";
+import mediaSource from "./MediaLibrary.tsx?raw";
+import notificationsSource from "./NotificationHistory.tsx?raw";
 import ts from "typescript";
 import { translate } from "./i18n";
 import { english } from "./locales/en";
@@ -53,6 +58,11 @@ describe("UI translations", () => {
       librarySource,
       clipsSource,
       updatesSource,
+      operationsSource,
+      startupSource,
+      configurationSource,
+      mediaSource,
+      notificationsSource,
     ]) {
       visit(
         ts.createSourceFile(

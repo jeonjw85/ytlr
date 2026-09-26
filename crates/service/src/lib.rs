@@ -1,8 +1,11 @@
 mod alerts;
 mod backup;
 pub mod client;
+mod files;
 mod http;
 mod notifications;
+mod operations;
+mod power;
 mod replica;
 mod retention;
 mod scheduler;
@@ -25,6 +28,10 @@ use ytlr_core::*;
 use ytlr_engine::Tools;
 
 pub struct Service {
+    pub file_activity: std::sync::Mutex<Option<std::time::Instant>>,
+    pub playback: Mutex<HashMap<String, files::PlaybackTicket>>,
+    pub power: RwLock<PowerStatus>,
+    pub op_active: Mutex<HashMap<String, CancellationToken>>,
     pub storage: RwLock<Vec<StorageStatus>>,
     pub store: Arc<Store>,
     pub paths: AppPaths,
@@ -41,9 +48,16 @@ pub struct Service {
 }
 
 impl Service {
+    pub fn note_file_activity(&self) {
+        if let Ok(mut until) = self.file_activity.lock() {
+            *until = Some(std::time::Instant::now() + std::time::Duration::from_secs(120));
+        }
+    }
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let settings = self.store.settings()?;
         Ok(Snapshot {
+            operations: self.store.operations()?,
+            power: self.power.read().await.clone(),
             storage: self.storage.read().await.clone(),
             version: env!("CARGO_PKG_VERSION").into(),
             jobs: self.store.jobs()?,
@@ -90,6 +104,7 @@ pub async fn run(paths: AppPaths) -> Result<()> {
         .try_lock_exclusive()
         .context("이미 녹화 서비스가 실행 중입니다.")?;
     let store = Arc::new(Store::open(&paths.database(), &paths.default_settings())?);
+    store.recover_operations()?;
     store.recover_interrupted()?;
     // Reconcile filesystem-derived usage after a crash between destructive
     // cleanup and its database/manifest publication.
@@ -125,6 +140,10 @@ pub async fn run(paths: AppPaths) -> Result<()> {
         version: env!("CARGO_PKG_VERSION").into(),
     };
     let state = Arc::new(Service {
+        file_activity: std::sync::Mutex::new(None),
+        playback: Mutex::new(HashMap::new()),
+        power: RwLock::new(PowerStatus::default()),
+        op_active: Mutex::new(HashMap::new()),
         storage: RwLock::new(vec![]),
         tools: Tools::new(paths.clone()),
         store,
@@ -150,6 +169,8 @@ pub async fn run(paths: AppPaths) -> Result<()> {
     let alerts = tokio::spawn(alerts::run(state.clone()));
     let notifications = tokio::spawn(notifications::run(state.clone()));
     let retention = tokio::spawn(retention::run(state.clone()));
+    let power = tokio::spawn(power::run(state.clone()));
+    let operations = tokio::spawn(operations::run(state.clone()));
     let checker = state.clone();
     let tool_checker = tokio::spawn(async move {
         loop {
@@ -192,6 +213,8 @@ pub async fn run(paths: AppPaths) -> Result<()> {
     let _ = alerts.await;
     let _ = notifications.await;
     let _ = retention.await;
+    let _ = power.await;
+    let _ = operations.await;
     signal.abort();
     let _ = tool_checker.await;
     let _ = std::fs::remove_file(paths.endpoint_file());
