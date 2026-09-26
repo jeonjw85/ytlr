@@ -301,15 +301,15 @@ impl Store {
                 priority: job.priority,
             };
             let key = hex::encode(Sha256::digest(serde_json::to_vec(&canonical)?));
-            if !videos.insert(job.video_id.clone())
-                || tx
-                    .query_row(
-                        "SELECT 1 FROM configuration_imports WHERE key=?",
-                        [&key],
-                        |_| Ok(()),
-                    )
-                    .optional()?
-                    .is_some()
+            if tx
+                .query_row(
+                    "SELECT 1 FROM configuration_imports WHERE key=?",
+                    [&key],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+                || !videos.insert(job.video_id.clone())
             {
                 report.skipped_schedules += 1;
                 continue;

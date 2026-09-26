@@ -222,21 +222,34 @@ pub async fn open_operation(
     download: bool,
     expected_target: String,
 ) -> Result<(), String> {
-    if !download {
+    let generation = if !download {
         let session = bridge.session.lock().map_err(|e| e.to_string())?;
         session.lease(&expected_target)?;
         if session.name.is_some() {
             return Err("원격 파일을 먼저 다운로드하세요.".into());
         }
-    }
+        Some(session.generation)
+    } else {
+        None
+    };
+    let _gate = bridge.local_gate.read().await;
     let ops: Vec<Operation> = bridge
         .local
         .get("/operations")
         .await
         .map_err(|e| e.to_string())?;
+    if let Some(generation) = generation
+        && bridge.session.lock().map_err(|e| e.to_string())?.generation != generation
+    {
+        return Err("연결 대상이 변경되었습니다.".into());
+    }
     let op = ops
         .into_iter()
-        .find(|o| o.id == id && o.state == "completed")
+        .find(|o| {
+            o.id == id
+                && o.state == "completed"
+                && (!download || matches!(o.request.task, OperationTask::Download { .. }))
+        })
         .ok_or("완료된 작업을 찾을 수 없습니다.")?;
     let path = op
         .result

@@ -25,6 +25,7 @@ export function MediaLibrary({
   const [files, setFiles] = useState<LibraryFile[]>([]);
   const [source, setSource] = useState("");
   const [url, setUrl] = useState("");
+  const [reload, setReload] = useState(0);
   const [duration, setDuration] = useState(0);
   const [start, setStart] = useState(0);
   const [end, setEnd] = useState(0);
@@ -34,23 +35,28 @@ export function MediaLibrary({
     .filter((o) => o.request.job_id === job.id && o.state === "completed")
     .map((o) => o.id)
     .join(",");
-  const preview = operations.find(
+  const previews = operations.filter(
     (o) =>
       o.request.job_id === job.id &&
       o.request.task.kind === "preview" &&
       o.request.task.path === source,
   );
-  const path =
-    preview?.state === "completed"
-      ? preview.result?.path?.split(/[\\/]/).pop()
-      : undefined;
+  const preview = previews.find((o) => o.state === "completed");
+  const path = preview?.result?.path?.split(/[\\/]/).pop();
+  const previewPending = previews.some((o) =>
+    ["queued", "running"].includes(o.state),
+  );
   useEffect(() => {
     let cancelled = false;
     void api<LibraryFile[]>(`/jobs/${job.id}/files`)
       .then((f) => {
         if (!cancelled) {
           setFiles(f);
-          setSource((old) => old || f.find((x) => !x.preview)?.path || "");
+          setSource((old) =>
+            f.some((x) => !x.preview && x.path === old)
+              ? old
+              : f.find((x) => !x.preview)?.path || "",
+          );
         }
       })
       .catch((e) => {
@@ -77,7 +83,7 @@ export function MediaLibrary({
     return () => {
       cancelled = true;
     };
-  }, [job.id, path]);
+  }, [job.id, source, path, reload]);
   async function queue(task: unknown) {
     setBusy(true);
     setMessage("");
@@ -117,12 +123,7 @@ export function MediaLibrary({
       <div className="tool-actions">
         <button
           className="button small"
-          disabled={
-            busy ||
-            !source ||
-            !isTerminal(job) ||
-            (preview && ["queued", "running"].includes(preview.state))
-          }
+          disabled={busy || !source || !isTerminal(job) || previewPending}
           onClick={() => void queue({ kind: "preview", path: source })}
         >
           {t("미리보기 파일 만들기")}
@@ -130,11 +131,7 @@ export function MediaLibrary({
         {path && (
           <button
             className="button small"
-            onClick={() =>
-              void mediaUrl(job.id, path)
-                .then(setUrl)
-                .catch((e) => setMessage(String(e)))
-            }
+            onClick={() => setReload((value) => value + 1)}
           >
             {t("미리보기 다시 열기")}
           </button>
@@ -167,6 +164,7 @@ export function MediaLibrary({
       {url && (
         <>
           <video
+            key={url}
             ref={video}
             controls
             preload="metadata"
@@ -267,7 +265,14 @@ export function MediaLibrary({
             </button>
             <button
               className="button"
-              disabled={busy || end <= start || start < 0 || end > duration}
+              disabled={
+                busy ||
+                !Number.isFinite(start) ||
+                !Number.isFinite(end) ||
+                end <= start ||
+                start < 0 ||
+                end > duration
+              }
               onClick={() =>
                 void queue({ kind: "range_clip", path: source, start, end })
               }

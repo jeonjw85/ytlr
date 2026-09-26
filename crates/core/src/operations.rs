@@ -1,6 +1,6 @@
 use crate::*;
 use anyhow::{Result, bail};
-use rusqlite::params;
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -99,7 +99,27 @@ impl Operation {
     }
 }
 
+fn unfinished_operations(conn: &Connection) -> Result<Vec<Operation>> {
+    let mut stmt = conn.prepare("SELECT body FROM operations WHERE json_extract(body,'$.state') NOT IN ('completed','failed','cancelled') ORDER BY rowid DESC")?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(|raw| Ok(serde_json::from_str(&raw)?))
+        .collect()
+}
+
 impl Store {
+    pub fn queued_operations(&self) -> Result<Vec<Operation>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT body FROM operations WHERE json_extract(body,'$.state')='queued' ORDER BY rowid DESC")?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|raw| Ok(serde_json::from_str(&raw)?))
+            .collect()
+    }
     pub fn operations(&self) -> Result<Vec<Operation>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare("SELECT body FROM operations ORDER BY rowid DESC")?;
@@ -127,18 +147,7 @@ impl Store {
         }
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
-        let mut existing = {
-            let mut stmt = tx.prepare("SELECT body FROM operations")?;
-            let rows = stmt
-                .query_map([], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows.into_iter()
-                .map(|s| serde_json::from_str::<Operation>(&s))
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        if existing.iter().filter(|o| !o.terminal()).count() + requests.len() > 1000 {
-            bail!("대기 작업 상한에 도달했습니다.");
-        }
+        let mut existing = unfinished_operations(&tx)?;
         let mut result = vec![];
         for req in requests {
             let fingerprint = serde_json::to_value(req)?;
@@ -148,6 +157,9 @@ impl Store {
             }) {
                 result.push(op.clone());
                 continue;
+            }
+            if existing.len() >= 1000 {
+                bail!("대기 작업 상한에 도달했습니다.");
             }
             let at = now();
             let op = Operation {
@@ -182,12 +194,20 @@ impl Store {
         id: &str,
         change: impl FnOnce(&mut Operation) -> Result<()>,
     ) -> Result<Operation> {
+        self.update_operation_checked(id, |_, operation| change(operation))
+    }
+
+    fn update_operation_checked(
+        &self,
+        id: &str,
+        change: impl FnOnce(&Connection, &mut Operation) -> Result<()>,
+    ) -> Result<Operation> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
         let raw: String =
             tx.query_row("SELECT body FROM operations WHERE id=?", [id], |r| r.get(0))?;
         let mut op: Operation = serde_json::from_str(&raw)?;
-        change(&mut op)?;
+        change(&tx, &mut op)?;
         op.updated_at = now();
         tx.execute(
             "UPDATE operations SET body=? WHERE id=?",
@@ -213,13 +233,25 @@ impl Store {
         })
     }
     pub fn retry_operation(&self, id: &str) -> Result<Operation> {
-        self.update_operation(id, |o| {
+        self.update_operation_checked(id, |conn, o| {
             if !matches!(o.state.as_str(), "failed" | "cancelled") {
                 bail!("실패하거나 취소된 작업만 재시도할 수 있습니다.");
+            }
+            let pending = unfinished_operations(conn)?;
+            let request = serde_json::to_value(&o.request)?;
+            if pending
+                .iter()
+                .any(|other| serde_json::to_value(&other.request).ok().as_ref() == Some(&request))
+            {
+                bail!("같은 파일 작업이 이미 대기 중이거나 실행 중입니다.");
+            }
+            if pending.len() >= 1000 {
+                bail!("대기 작업 상한에 도달했습니다.");
             }
             o.state = "queued".into();
             o.cancel_requested = false;
             o.error = None;
+            o.result = None;
             o.progress = None;
             o.message = "재검증 후 재시도 대기".into();
             Ok(())
@@ -255,11 +287,10 @@ impl Store {
         Ok(())
     }
     pub fn job_has_operations(&self, id: &str) -> Result<bool> {
-        Ok(self.operations()?.iter().any(|o| {
-            o.request.job_id == id
-                && !o.terminal()
-                && !matches!(o.request.task, OperationTask::Download { .. })
-        }))
+        Ok(self.lock()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE json_extract(body,'$.request.job_id')=? AND json_extract(body,'$.state') NOT IN ('completed','failed','cancelled') AND json_extract(body,'$.request.task.kind')!='download')",
+            [id], |row| row.get(0),
+        )?)
     }
 }
 

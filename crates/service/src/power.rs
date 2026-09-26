@@ -50,6 +50,9 @@ impl Guard {
 #[cfg(not(windows))]
 impl Drop for Guard {
     fn drop(&mut self) {
+        if self.0.try_wait().is_ok_and(|status| status.is_some()) {
+            return;
+        }
         #[cfg(unix)]
         unsafe {
             libc::kill(-(self.0.id() as i32), libc::SIGTERM);

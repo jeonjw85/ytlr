@@ -86,9 +86,26 @@ pub async fn retry(
     State(s): State<Arc<Service>>,
     Path(id): Path<String>,
 ) -> crate::http::ApiResult<Operation> {
-    let active = s.op_active.lock().await;
-    if active.contains_key(&id) {
+    // Use the same lock order as claims/deletion so a retry cannot revive a job
+    // after deletion or recording restart has already reserved it.
+    let active = s.active.lock().await;
+    let running = s.op_active.lock().await;
+    if s.shutdown.is_cancelled() || running.contains_key(&id) {
         return Err(anyhow::anyhow!("작업 종료를 기다려 주세요.").into());
+    }
+    let operation = s.store.operation(&id)?;
+    if let OperationTask::Download { remote, .. } = &operation.request.task {
+        if !s.paths.remotes()?.iter().any(|r| &r.name == remote) {
+            return Err(anyhow::anyhow!("등록된 원격 서버를 찾을 수 없습니다.").into());
+        }
+    } else {
+        let job = s.store.job(&operation.request.job_id)?;
+        if active.contains_key(&job.id) || !job.state.terminal() {
+            return Err(anyhow::anyhow!("파일 처리 완료 후 작업을 재시도하세요.").into());
+        }
+        if job.protected && matches!(operation.request.task, OperationTask::Cleanup { .. }) {
+            return Err(anyhow::anyhow!("중요 녹화 보호를 해제하세요.").into());
+        }
     }
     Ok(Json(s.store.retry_operation(&id)?))
 }
@@ -100,7 +117,7 @@ pub async fn run(s: Arc<Service>) {
         if s.installing.load(std::sync::atomic::Ordering::SeqCst) {
             continue;
         }
-        let Ok(operations) = s.store.operations() else {
+        let Ok(operations) = s.store.queued_operations() else {
             continue;
         };
         // Reserve while holding the same lock as idle shutdown.
@@ -135,43 +152,57 @@ pub async fn run(s: Arc<Service>) {
         running.insert(op.id.clone(), token.clone());
         drop(running);
         drop(active);
-        let result = execute(s.clone(), op.clone(), token.clone()).await;
-        let mut running = s.op_active.lock().await;
-        let _ = s.store.update_operation(&op.id, |o| {
-            match result {
-                Ok(value) => {
-                    let partial = value.get("completed") == Some(&Value::Bool(false));
-                    o.state = if partial { "failed" } else { "completed" }.into();
-                    o.cancel_requested = false;
-                    o.progress = if partial { None } else { Some(1.0) };
-                    o.result = Some(value);
-                    o.message = if partial {
-                        "일부 파일 정리가 남아 있습니다."
-                    } else {
-                        "작업 완료"
+        let result = execute(s.clone(), op.clone(), token.clone())
+            .await
+            .map_err(|error| redact(&error.to_string()));
+        loop {
+            let mut running = s.op_active.lock().await;
+            let saved = s.store.update_operation(&op.id, |o| {
+                match &result {
+                    Ok(value) => {
+                        let partial = value.get("completed") == Some(&Value::Bool(false));
+                        o.state = if partial { "failed" } else { "completed" }.into();
+                        o.cancel_requested = false;
+                        o.progress = if partial { None } else { Some(1.0) };
+                        o.result = Some(value.clone());
+                        o.message = if partial {
+                            "일부 파일 정리가 남아 있습니다."
+                        } else {
+                            "작업 완료"
+                        }
+                        .into();
+                        if partial {
+                            o.error = Some("남은 파일을 재검증하려면 작업을 재시도하세요.".into());
+                        }
                     }
-                    .into();
-                    if partial {
-                        o.error = Some("남은 파일을 재검증하려면 작업을 재시도하세요.".into());
+                    Err(error) => {
+                        if o.cancel_requested {
+                            o.state = "cancelled".into();
+                            o.message = "작업 취소 · 받은 파일 보존".into();
+                        } else if s.shutdown.is_cancelled() {
+                            o.state = "queued".into();
+                            o.message = "서비스 종료 · 재검증 후 재개 대기".into();
+                        } else {
+                            o.state = "failed".into();
+                            o.error = Some(error.clone());
+                            o.message = "작업 실패".into();
+                        }
                     }
                 }
-                Err(error) => {
-                    if o.cancel_requested {
-                        o.state = "cancelled".into();
-                        o.message = "작업 취소 · 받은 파일 보존".into();
-                    } else if s.shutdown.is_cancelled() {
-                        o.state = "queued".into();
-                        o.message = "서비스 종료 · 재검증 후 재개 대기".into();
-                    } else {
-                        o.state = "failed".into();
-                        o.error = Some(redact(&error.to_string()));
-                        o.message = "작업 실패".into();
-                    }
-                }
+                Ok(())
+            });
+            if saved.is_ok() {
+                running.remove(&op.id);
+                break;
             }
-            Ok(())
-        });
-        running.remove(&op.id);
+            drop(running);
+            // Keep the operation reserved while its terminal state is not durable.
+            // On shutdown, the stored running state is revalidated on next start.
+            tokio::select! {
+                _ = s.shutdown.cancelled() => { s.op_active.lock().await.remove(&op.id); return; }
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
     }
 }
 

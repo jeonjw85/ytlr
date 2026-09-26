@@ -67,7 +67,10 @@ export function Configuration({
         multiple: false,
         filters: [{ name: "JSON", extensions: ["json"] }],
       });
-      if (path) setBundle(await invoke("load_configuration", { path }));
+      if (path) {
+        setBundle(null);
+        setBundle(await invoke("load_configuration", { path }));
+      }
     } catch (e) {
       setMessage(String(e));
     } finally {
@@ -77,6 +80,7 @@ export function Configuration({
   async function importFile(preview: boolean) {
     setBusy(true);
     setMessage("");
+    setReport(null);
     try {
       const value = await api<ImportReport>(
         `/configuration/${preview ? "preview" : "import"}`,
@@ -126,6 +130,7 @@ export function Configuration({
           <label className="field">
             {t("가져온 예약의 저장 폴더")}
             <input
+              disabled={busy}
               value={storage}
               onChange={(e) => {
                 setStorage(e.target.value);
@@ -136,6 +141,7 @@ export function Configuration({
           <label className="check-field">
             <input
               type="checkbox"
+              disabled={busy}
               checked={replace}
               onChange={(e) => {
                 setReplace(e.target.checked);
@@ -147,6 +153,7 @@ export function Configuration({
           <label className="check-field">
             <input
               type="checkbox"
+              disabled={busy}
               checked={settings}
               onChange={(e) => {
                 setSettings(e.target.checked);

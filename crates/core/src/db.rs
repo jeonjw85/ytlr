@@ -23,6 +23,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS maintenance_events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, job_id TEXT NOT NULL, message TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS channel_events (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS operations_state ON operations(json_extract(body,'$.state'));
+            CREATE INDEX IF NOT EXISTS operations_job ON operations(json_extract(body,'$.request.job_id'));
             CREATE TABLE IF NOT EXISTS configuration_imports (key TEXT PRIMARY KEY, job_id TEXT NOT NULL);
             PRAGMA user_version=1;")?;
         conn.execute(
