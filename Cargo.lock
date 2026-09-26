@@ -6115,7 +6115,7 @@ dependencies = [
 
 [[package]]
 name = "ytlr"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -6130,7 +6130,7 @@ dependencies = [
 
 [[package]]
 name = "ytlr-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6148,7 +6148,7 @@ dependencies = [
 
 [[package]]
 name = "ytlr-desktop"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "axum",
  "fs2",
@@ -6171,7 +6171,7 @@ dependencies = [
 
 [[package]]
 name = "ytlr-engine"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6197,7 +6197,7 @@ dependencies = [
 
 [[package]]
 name = "ytlr-service"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "async-stream",

@@ -179,11 +179,11 @@ pub async fn render(
                 Ok::<_, anyhow::Error>(child.wait().await?)
             } => result,
         };
-        if outcome.is_err() {
-            if let Err(error) = stop_child(&mut child, &mut lifetime_pipe, supervisor.is_some()).await {
-                errors.abort();
-                return Err(error);
-            }
+        if outcome.is_err()
+            && let Err(error) = stop_child(&mut child, &mut lifetime_pipe, supervisor.is_some()).await
+        {
+            errors.abort();
+            return Err(error);
         }
         cleanup_temp = true;
         let stderr = errors.await.unwrap_or_default();
