@@ -49,6 +49,7 @@ pub fn router(state: Arc<Service>) -> Router {
         .route("/operations/{id}/cancel", post(crate::operations::cancel))
         .route("/operations/{id}/retry", post(crate::operations::retry))
         .route("/jobs", post(record))
+        .route("/downloads", post(download))
         .route("/jobs/{id}", delete(delete_job))
         .route("/jobs/{id}/stop", post(stop))
         .route("/jobs/{id}/retry", post(retry))
@@ -180,6 +181,14 @@ async fn record(
         s.fanout_job(&job);
     }
     Ok(Json(s.store.job(&job.id)?))
+}
+async fn download(
+    state: State<Arc<Service>>,
+    headers: HeaderMap,
+    Json(mut req): Json<RecordRequest>,
+) -> ApiResult<RecordingJob> {
+    req.kind = JobKind::Download;
+    record(state, headers, Json(req)).await
 }
 async fn delete_job(State(s): State<Arc<Service>>, Path(id): Path<String>) -> ApiResult<Value> {
     delete_job_impl(s, id, false)
@@ -1029,6 +1038,7 @@ mod tests {
             .store
             .add_job(
                 &RecordRequest {
+                    kind: JobKind::Live,
                     schedule: RecordingSchedule::default(),
                     stop_at: None,
                     recording_options: RecordingOptions::default(),

@@ -145,7 +145,12 @@ fn auth(state: &Service) -> (Option<std::path::PathBuf>, Option<std::path::PathB
 async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationToken) -> Result<()> {
     state.store.update_job(&job.id, |j| {
         j.state = JobState::Preparing;
-        j.message = "방송 정보 확인 중".into();
+        j.message = if j.kind == JobKind::Download {
+            "영상 정보 확인 중"
+        } else {
+            "방송 정보 확인 중"
+        }
+        .into();
     })?;
     let (cookie_file, po_token) = auth(&state);
     let info = tokio::select! {
@@ -165,7 +170,16 @@ async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationTok
         j.format = info.format.clone();
         j.resolution = info.resolution.clone();
     })?;
-    if info.live_status == "is_upcoming" {
+    if job.kind == JobKind::Download
+        && !matches!(info.live_status.as_str(), "not_live" | "was_live")
+    {
+        state.store.update_job(&job.id, |j| {
+            j.state = JobState::Failed;
+            j.message = "다운로드 가능한 일반 영상 또는 종료된 방송이 아닙니다. 라이브·예약 방송은 새 녹화를 이용하세요.".into();
+        })?;
+        return Ok(());
+    }
+    if job.kind == JobKind::Live && info.live_status == "is_upcoming" {
         state.store.update_job(&job.id, |j| {
             j.state = JobState::Waiting;
             j.message = "예약 방송 시작 대기".into();
@@ -177,7 +191,7 @@ async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationTok
             .insert(job.id.clone(), Instant::now() + Duration::from_secs(30));
         return Ok(());
     }
-    if info.live_status != "is_live" {
+    if job.kind == JobKind::Live && info.live_status != "is_live" {
         if job.attempt > 0 {
             finish(&state, &job.id, false).await?;
         } else {
@@ -205,8 +219,16 @@ async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationTok
         }
         j.attempt += 1;
         j.state = JobState::Recording;
-        j.message = "스트림 연결 중".into();
-        if j.attempt > 1 {
+        j.message = if j.kind == JobKind::Download {
+            "다운로드 연결 중"
+        } else {
+            "스트림 연결 중"
+        }
+        .into();
+        if j.kind == JobKind::Download {
+            // Each retry downloads the entire video into a fresh attempt directory.
+            j.continuity_uncertain = false;
+        } else if j.attempt > 1 {
             j.continuity_uncertain = true;
         }
         if j.started_at.is_none() {
@@ -241,6 +263,8 @@ async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationTok
         finish(&state, &job.id, false).await?;
     } else if cancel.is_cancelled() {
         interrupted_state(&state, &job.id)?;
+    } else if result.success && !result.interrupted && job.kind == JobKind::Download {
+        finish(&state, &job.id, true).await?;
     } else if result.success && !result.interrupted {
         // Exit status alone does not prove the broadcast ended.
         match inspect(
@@ -360,12 +384,33 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
     }
     fill_gaps(state, id).await?;
     let job = state.store.job(id)?;
-    let mut outputs =
-        discover_outputs(&state.tools, &job.output_dir, &job.recording_options).await?;
-    for n in 1..=job.attempt {
+    let mut outputs = if job.kind == JobKind::Download {
+        vec![]
+    } else {
+        discover_outputs(&state.tools, &job.output_dir, &job.recording_options).await?
+    };
+    let mut attempts: Vec<_> = (1..=job.attempt).collect();
+    if job.kind == JobKind::Download {
+        attempts.reverse();
+        if natural_end {
+            // An older file must never certify a new download as completed.
+            attempts.truncate(1);
+        }
+    }
+    for n in attempts {
+        if job.kind == JobKind::Download && !outputs.is_empty() {
+            break;
+        }
         let dir = job.output_dir.join(format!("attempt-{n:04}"));
         if !dir.exists() || outputs.iter().any(|o| o.path.starts_with(&dir)) {
             continue;
+        }
+        if job.kind == JobKind::Download {
+            // A failed/empty retry must not hide the previous playable result.
+            outputs = discover_outputs(&state.tools, &dir, &job.recording_options).await?;
+            if !outputs.is_empty() {
+                break;
+            }
         }
         match salvage_attempt(&state.tools, &dir, &job.recording_options).await {
             Ok(Some(output)) => {
@@ -422,7 +467,7 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
         && natural_end
         && !stopped
         && !job.continuity_uncertain
-        && job.attempt == 1
+        && (job.kind == JobKind::Download || job.attempt == 1)
         && open_gaps == 0
         && !outputs.is_empty();
     let job = state.store.update_job(id, |j| {
@@ -665,6 +710,7 @@ pub async fn monitor(state: Arc<Service>) {
                             decision.window_start.as_deref().unwrap_or("once")
                         );
                         let request = RecordRequest {
+                            kind: JobKind::Live,
                             schedule: RecordingSchedule {
                                 start_at: None,
                                 duration_minutes: channel.rules.duration_minutes,

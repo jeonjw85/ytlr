@@ -93,8 +93,11 @@ if (args.includes("--dump-single-json")) {
       title: `Fixture ${id}`,
       channel: "Test channel",
       format: "test highest",
-      live_status:
-        id === "qqqqwwwweee"
+      live_status: id.startsWith("vod")
+        ? id === "vodaudio001"
+          ? "was_live"
+          : "not_live"
+        : id === "qqqqwwwweee"
           ? "is_upcoming"
           : ["ffffgggghhh", "audioonly01"].includes(id) && count > 0
             ? "was_live"
@@ -152,7 +155,48 @@ console.log(
 const media = fs.readFileSync(
   path.join(home, audioOnly ? "sample.mka" : "sample.mkv"),
 );
+if (id === "vodretry001" && folder.endsWith("attempt-0003")) {
+  fs.rmSync(marker, { force: true });
+  console.error("ERROR: download failed before receiving media");
+  process.exit(1);
+}
 fs.writeFileSync(`${output}.part`, media);
+if (id.startsWith("vod")) {
+  if (
+    !args.includes("--abort-on-unavailable-fragments") ||
+    args.includes("--live-from-start")
+  )
+    throw new Error(
+      "VOD must reject missing fragments and disable live-from-start",
+    );
+  console.log(
+    "__YTLR_PROGRESS__" +
+      JSON.stringify({
+        bytes: media.length,
+        track: "video",
+        status: "finished",
+      }),
+  );
+  fs.rmSync(marker, { force: true });
+  if (id === "vodretry001" && folder.endsWith("attempt-0001")) {
+    console.error("ERROR: transient download failure");
+    process.exit(1);
+  }
+  if (id === "vodwarn0001") {
+    console.error(
+      'WARNING: [youtube] Skipping client "web" since it does not support cookies',
+    );
+    console.error("WARNING: fragment not found; retrying (1/5)");
+  }
+  if (id === "vodmerge001") {
+    if (args.includes("post_process:__YTLR_FINALIZING__%(id)j"))
+      console.log(`__YTLR_FINALIZING__${JSON.stringify(id)}`);
+    // A merge can run longer than the network inactivity timeout without receiving bytes.
+    await new Promise((resolve) => setTimeout(resolve, 35000));
+  }
+  fs.renameSync(`${output}.part`, output);
+  process.exit(0);
+}
 let n = 0;
 const timer = setInterval(() => {
   n++;

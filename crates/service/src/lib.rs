@@ -80,6 +80,9 @@ impl Service {
     }
 
     pub fn fanout_job(&self, job: &RecordingJob) {
+        if job.kind == JobKind::Download {
+            return;
+        }
         let Ok(settings) = self.store.settings() else {
             return;
         };

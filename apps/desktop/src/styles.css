@@ -1154,3 +1154,8 @@ main {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+.page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

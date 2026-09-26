@@ -245,6 +245,29 @@ ytlr operation clip JOB_ID attempt-0001/recording-OUTPUT_ID.mkv --start 30 --end
 `[{"job_id":"JOB_ID","task":{"kind":"export","index":0}}]`.
 The existing synchronous `export`, `clip`, and `cleanup` commands remain available.
 
+## Video downloads
+
+Use **Download video** to save a regular YouTube video or an archived broadcast.
+Choose best quality, a 1080p/720p/480p cap, or audio only. Monitor and stop downloads
+in the recordings view, then open or export completed files from the library.
+Downloads use the configured storage location and authentication files. When
+connected to a remote server, files are saved on that server. Use **New recording**
+for live or upcoming broadcasts.
+
+The service continues downloading after the app closes, sharing the recording
+concurrency and disk-space limits. After a failure or service restart, it preserves
+previous files and downloads from the beginning in a new attempt directory. After
+a successful retry, the library shows the latest attempt's result. Video is saved
+as MKV; compatible results can be exported to MP4 using the existing export action.
+
+```sh
+ytlr download 'https://youtu.be/VIDEO_ID'
+ytlr download 'https://youtu.be/VIDEO_ID' --max-height 720
+ytlr download 'https://youtu.be/VIDEO_ID' --audio-only
+```
+
+Update and restart an older service if it does not provide the `/downloads` API.
+
 ## Recording Semantics
 
 The default is **Video + audio / Best quality**. In the desktop recording

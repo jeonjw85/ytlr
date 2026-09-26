@@ -58,7 +58,9 @@ pub fn note_attempt_start(job: &mut RecordingJob, n: u32, started_at: &str) {
     if job.attempts.iter().any(|attempt| attempt.n == n) {
         return;
     }
-    if let Some(prev) = job.attempts.iter().find(|attempt| attempt.n + 1 == n) {
+    if job.kind == crate::JobKind::Live
+        && let Some(prev) = job.attempts.iter().find(|attempt| attempt.n + 1 == n)
+    {
         let gap_start = prev
             .last_media_at
             .clone()
@@ -145,6 +147,7 @@ mod tests {
 
     fn job() -> RecordingJob {
         RecordingJob {
+            kind: JobKind::Live,
             schedule: crate::RecordingSchedule::default(),
             protected: false,
             finished_at: None,

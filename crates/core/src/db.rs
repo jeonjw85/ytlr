@@ -166,7 +166,7 @@ impl Store {
             let mut s = tx.prepare("SELECT body FROM jobs WHERE video_id=? ORDER BY rowid DESC")?;
             for raw in s.query_map([&video_id], |r| r.get::<_, String>(0))? {
                 let existing: RecordingJob = serde_json::from_str(&raw?)?;
-                if automatic || !existing.state.terminal() {
+                if (automatic && existing.kind == request.kind) || !existing.state.terminal() {
                     matching = Some(existing);
                     break;
                 }
@@ -188,10 +188,11 @@ impl Store {
             if occurrence.is_some() {
                 bail!("같은 방송의 이전 작업이 아직 실행 중입니다.");
             }
-            let requested_live_from_start =
-                request.live_from_start.unwrap_or(settings.live_from_start);
+            let requested_live_from_start = request.kind == JobKind::Live
+                && request.live_from_start.unwrap_or(settings.live_from_start);
             if !automatic
-                && (job.recording_options != request.recording_options
+                && (job.kind != request.kind
+                    || job.recording_options != request.recording_options
                     || job.live_from_start != requested_live_from_start
                     || job.stop_at != stop_at
                     || job.priority != request.priority)
@@ -318,7 +319,9 @@ impl Store {
                 created_at: now(),
                 attempt: job.attempt,
                 received_at,
-                media_seconds: if job.live_from_start && job.attempt == 1 {
+                media_seconds: if job.kind == JobKind::Download
+                    || (job.live_from_start && job.attempt == 1)
+                {
                     None
                 } else {
                     Some(job.media_seconds)
@@ -630,6 +633,7 @@ mod tests {
         let job = db
             .add_job(
                 &RecordRequest {
+                    kind: JobKind::Live,
                     schedule: RecordingSchedule::default(),
                     stop_at: None,
                     url: "https://youtu.be/abcdefghijk".into(),
@@ -651,10 +655,11 @@ mod tests {
         );
         let mut old = serde_json::to_value(saved).unwrap();
         old.as_object_mut().unwrap().remove("recording_options");
-        for key in ["stop_at", "bookmarks", "alerts", "recovery_error"] {
+        for key in ["kind", "stop_at", "bookmarks", "alerts", "recovery_error"] {
             old.as_object_mut().unwrap().remove(key);
         }
         let legacy: RecordingJob = serde_json::from_value(old).unwrap();
+        assert_eq!(legacy.kind, JobKind::Live);
         assert_eq!(legacy.recording_options, RecordingOptions::default());
         let invalid: RecordRequest = serde_json::from_value(serde_json::json!({
             "url": "https://youtu.be/lmnopqrstuv", "recording_options": {"max_height": 999}
@@ -664,11 +669,45 @@ mod tests {
         assert_eq!(db.jobs().unwrap().len(), 1);
     }
     #[test]
+    fn downloads_persist_kind_and_do_not_inherit_live_from_start() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
+        let mut settings = paths.default_settings();
+        settings.live_from_start = true;
+        let db = Store::open(&paths.database(), &settings).unwrap();
+        let mut req: RecordRequest = serde_json::from_value(serde_json::json!({
+            "url": "https://youtu.be/abcdefghijk", "kind": "download"
+        }))
+        .unwrap();
+        let job = db.add_job(&req, None, false).unwrap();
+        assert!(!job.live_from_start);
+        assert_eq!(db.add_job(&req, None, false).unwrap().id, job.id);
+        req.kind = JobKind::Live;
+        assert!(db.add_job(&req, None, false).is_err());
+        drop(db);
+        let db = Store::open(&paths.database(), &settings).unwrap();
+        assert_eq!(db.job(&job.id).unwrap().kind, JobKind::Download);
+        assert_eq!(
+            db.export_configuration().unwrap().schedules[0].kind,
+            JobKind::Download
+        );
+        db.update_job(&job.id, |j| j.state = JobState::Failed)
+            .unwrap();
+        let live = db
+            .add_window_job(&req, "channel".into(), "broadcast", false)
+            .unwrap()
+            .unwrap();
+        assert_ne!(live.id, job.id);
+        assert_eq!(live.kind, JobKind::Live);
+    }
+
+    #[test]
     fn interrupted_jobs_preserve_data_and_stop_intent() {
         let d = tempfile::tempdir().unwrap();
         let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
         let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
         let req = RecordRequest {
+            kind: JobKind::Live,
             schedule: RecordingSchedule::default(),
             stop_at: None,
             recording_options: RecordingOptions::default(),
@@ -706,6 +745,7 @@ mod tests {
         let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
         let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
         let req = RecordRequest {
+            kind: JobKind::Live,
             schedule: RecordingSchedule::default(),
             stop_at: None,
             recording_options: RecordingOptions::default(),

@@ -125,6 +125,28 @@ test("GUI persists language and controls the real Rust service: create, deduplic
   ).toBeEnabled();
   await expect(page.locator(".local-status")).toContainText("Recording device");
   await page
+    .getByRole("button", { name: "Download video", exact: true })
+    .click();
+  const downloadDialog = page.getByRole("dialog", { name: "Download video" });
+  await expect(downloadDialog).toBeVisible();
+  await expect(downloadDialog.getByRole("checkbox")).toHaveCount(0);
+  await page.getByLabel("Video URL").fill("https://youtu.be/vodvideo001");
+  await page.getByLabel("Maximum quality").selectOption("720");
+  await page
+    .getByRole("button", { name: "Start download", exact: true })
+    .click();
+  await expect(downloadDialog).toHaveCount(0);
+  await expect(page.locator(".job-card")).toHaveCount(1);
+  const download = (await call("/snapshot")).jobs[0];
+  expect(download.kind).toBe("download");
+  expect(download.live_from_start).toBe(false);
+  expect(download.recording_options.max_height).toBe(720);
+  await page.reload();
+  await expect(page.locator(".job-card")).toContainText("Download video");
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await expect(page.locator(".job-card")).toHaveCount(0);
+  await call(`/jobs/${download.id}`, "DELETE");
+  await page
     .getByRole("button", { name: "New recording", exact: true })
     .click();
   await expect(

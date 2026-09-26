@@ -72,6 +72,7 @@ pub fn new_recording_job(
     let id = uuid::Uuid::new_v4().to_string();
     let at = now();
     Ok(RecordingJob {
+        kind: request.kind,
         schedule,
         protected: false,
         finished_at: None,
@@ -84,11 +85,21 @@ pub fn new_recording_job(
         id,
         url,
         video_id,
-        title: "방송 정보 확인 대기".into(),
+        title: if request.kind == JobKind::Download {
+            "영상 정보 확인 대기"
+        } else {
+            "방송 정보 확인 대기"
+        }
+        .into(),
         channel: String::new(),
         channel_id,
         state: JobState::Queued,
-        message: "녹화 대기".into(),
+        message: if request.kind == JobKind::Download {
+            "다운로드 대기"
+        } else {
+            "녹화 대기"
+        }
+        .into(),
         created_at: at.clone(),
         updated_at: at,
         started_at: None,
@@ -100,7 +111,8 @@ pub fn new_recording_job(
         attempt: 0,
         retries: 0,
         priority: request.priority,
-        live_from_start: request.live_from_start.unwrap_or(settings.live_from_start),
+        live_from_start: request.kind == JobKind::Live
+            && request.live_from_start.unwrap_or(settings.live_from_start),
         continuity_uncertain: false,
         stop_requested: false,
         outputs: vec![],
@@ -172,6 +184,7 @@ impl Store {
                         && !j.stop_requested
                 })
                 .map(|j| RecordRequest {
+                    kind: j.kind,
                     url: j.url,
                     schedule: j.schedule,
                     stop_at: j.stop_at,
@@ -293,6 +306,7 @@ impl Store {
                 continue;
             }
             let canonical = RecordRequest {
+                kind: job.kind,
                 url: job.url.clone(),
                 schedule: job.schedule.clone(),
                 stop_at: job.stop_at.clone(),

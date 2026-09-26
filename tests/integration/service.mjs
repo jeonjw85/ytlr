@@ -223,6 +223,101 @@ try {
       retention: {},
     },
   });
+  console.log(
+    "[integration] video downloads: video/audio, retries and live rejection",
+  );
+  for (const [id, audioOnly] of [
+    ["vodwarn0001", false],
+    ["vodvideo001", false],
+    ["vodaudio001", true],
+    ["vodretry001", false],
+  ]) {
+    const download = await request("/downloads", "POST", {
+      url: `https://youtu.be/${id}`,
+      recording_options: {
+        audio_only: audioOnly,
+        max_height: audioOnly ? null : 720,
+      },
+    });
+    assert.equal(download.kind, "download");
+    assert.equal(download.live_from_start, false);
+    const complete = await until(async () => {
+      const job = (await request("/snapshot")).jobs.find(
+        (j) => j.id === download.id,
+      );
+      return job.state === "completed" && job;
+    }, `download ${id}`);
+    assert.equal(complete.outputs.length, 1);
+    assert.equal(complete.outputs[0].has_audio, true);
+    assert.equal(complete.outputs[0].has_video, !audioOnly);
+    assert(complete.outputs[0].duration > 60);
+    assert(complete.outputs[0].sha256);
+    assert.equal(complete.gaps.length, 0);
+    assert.equal(complete.continuity_uncertain, false);
+    const formats = await readFile(join(home, `${id}.formats`), "utf8");
+    assert(
+      formats.includes(
+        audioOnly ? "capture:ba" : "capture:bv*[height<=720]+ba/b[height<=720]",
+      ),
+    );
+    if (id === "vodretry001") {
+      assert.equal(complete.attempt, 2);
+      assert(complete.outputs[0].path.includes("attempt-0002"));
+      assert(
+        (
+          await stat(
+            join(complete.output_dir, "attempt-0001", "source.mkv.part"),
+          )
+        ).size > 0,
+      );
+      const settings = (await request("/snapshot")).settings;
+      await request("/settings", "PUT", { ...settings, max_retries: 0 });
+      await request(`/jobs/${download.id}/retry`, "POST", {});
+      const failedRetry = await until(async () => {
+        const job = (await request("/snapshot")).jobs.find(
+          (j) => j.id === download.id,
+        );
+        return job.attempt === 3 && job.state === "partial" && job;
+      }, "empty retry preserves previous download result");
+      assert.equal(failedRetry.outputs.length, 1);
+      assert.equal(failedRetry.outputs[0].path, complete.outputs[0].path);
+      assert.equal(failedRetry.outputs[0].sha256, complete.outputs[0].sha256);
+      await request("/settings", "PUT", settings);
+    }
+  }
+  const mergeSettings = (await request("/snapshot")).settings;
+  await request("/settings", "PUT", {
+    ...mergeSettings,
+    stall_timeout_secs: 30,
+  });
+  const merging = await request("/downloads", "POST", {
+    url: "https://youtu.be/vodmerge001",
+  });
+  const merged = await until(
+    async () => {
+      const job = (await request("/snapshot")).jobs.find(
+        (j) => j.id === merging.id,
+      );
+      return job.state === "completed" && job;
+    },
+    "long download merge is not a network stall",
+    55,
+  );
+  assert.equal(merged.attempt, 1);
+  assert.equal(merged.retries, 0);
+  await request("/settings", "PUT", mergeSettings);
+  for (const id of ["livevideo01", "qqqqwwwweee"]) {
+    const url = `https://youtu.be/${id}`;
+    const download = await request("/downloads", "POST", { url });
+    const failed = await until(async () => {
+      const job = (await request("/snapshot")).jobs.find(
+        (j) => j.id === download.id,
+      );
+      return job.state === "failed" && job;
+    }, "live download rejected");
+    assert.equal(failed.attempt, 0);
+    assert(failed.message.includes("새 녹화"));
+  }
   const scheduled = await request("/jobs", "POST", {
     url: "https://youtu.be/starttime01",
     schedule: {

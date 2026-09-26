@@ -19,8 +19,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use ytlr_core::{
-    JobState, RecordingJob, RecordingOptions, Settings, Store, atomic_write, note_media_received,
-    now, private_dir,
+    JobKind, JobState, RecordingJob, RecordingOptions, Settings, Store, atomic_write,
+    note_media_received, now, private_dir,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,16 +226,30 @@ pub fn capture_args(
         "--no-playlist", "--no-simulate", "--newline", "--progress", "--progress-delta", "1",
         "--keep-fragments", "--keep-video", "--no-overwrites", "--no-post-overwrites",
         "--fragment-retries", "5", "--retry-sleep", "fragment:exp=1:10", "--concurrent-fragments", "2",
-        "--skip-unavailable-fragments", "--merge-output-format", "mkv", "--remux-video", "mkv",
+        "--merge-output-format", "mkv", "--remux-video", "mkv",
         "--fixup", "never",
         "--progress-template", "download:__YTLR_PROGRESS__{\"bytes\":%(progress.downloaded_bytes)j,\"track\":%(info.format_id)j,\"status\":%(progress.status)j}",
         "--print", "before_dl:__YTLR_INFO__%(.{id,title,channel,format,resolution,format_id})j",
+        // --print enables quiet mode, which suppresses ordinary [Merger] messages.
+        "--print", "post_process:__YTLR_FINALIZING__%(id)j",
     ].into_iter().map(String::from));
+    args.push(
+        if job.kind == JobKind::Download {
+            "--abort-on-unavailable-fragments"
+        } else {
+            "--skip-unavailable-fragments"
+        }
+        .into(),
+    );
+    if job.kind == JobKind::Download {
+        // Re-check at download time too, in case the source changed after inspection.
+        args.extend(["--match-filter".into(), "!is_live & !is_upcoming".into()]);
+    }
     job.recording_options.validate()?;
     args.extend(["--format".into(), job.recording_options.format_selector()]);
     // New attempts have distinct filenames. Unknown boundaries are never appended blindly.
     args.push(
-        if job.live_from_start && job.attempt == 1 {
+        if job.kind == JobKind::Live && job.live_from_start && job.attempt == 1 {
             "--live-from-start"
         } else {
             "--no-live-from-start"
@@ -260,7 +274,24 @@ pub struct ProgressTracker {
     started: Option<Instant>,
 }
 
+fn reports_media_gap(line: &str, kind: JobKind) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("skipping fragment")
+        || (kind == JobKind::Live && lower.contains("fragment not found"))
+        || lower.contains("non-monoton")
+        || lower.contains("failed to open segment")
+}
+
 impl ProgressTracker {
+    pub fn download_stalled(&self, at: Instant, started: Instant, timeout: Duration) -> bool {
+        let last = self
+            .tracks
+            .values()
+            .map(|(_, last)| *last)
+            .max()
+            .unwrap_or(started);
+        at.duration_since(last) > timeout
+    }
     pub fn observe(&mut self, track: &str, bytes: u64, at: Instant) -> bool {
         self.started.get_or_insert(at);
         let old = self.tracks.entry(track.into()).or_insert((0, at));
@@ -376,7 +407,7 @@ pub async fn capture(
         )?,
     )?;
     let started_at = now();
-    let ffmpeg_mode = !(job.live_from_start && job.attempt == 1);
+    let ffmpeg_mode = job.kind == JobKind::Live && !(job.live_from_start && job.attempt == 1);
     let arguments = capture_args(
         &tools,
         &job,
@@ -465,8 +496,8 @@ pub async fn capture(
                     if let Ok(value) = serde_json::from_str::<Value>(raw) {
                         let bytes = value["bytes"].as_u64().unwrap_or(0);
                         let track = value["track"].as_str().unwrap_or("muxed");
-                        if tracker.observe(track, bytes, Instant::now()) {
-                            store.update_job(&job.id, |j| { let at = now(); note_media_received(j, job.attempt, &at); j.last_media_at = Some(at); j.state = JobState::Recording; j.message = "녹화 중 · 원본 보존".into(); })?;
+                        if tracker.observe(track, bytes, Instant::now()) && !finalizing {
+                            store.update_job(&job.id, |j| { let at = now(); note_media_received(j, job.attempt, &at); j.last_media_at = Some(at); j.state = JobState::Recording; j.message = if j.kind == JobKind::Download { "다운로드 중 · 원본 보존" } else { "녹화 중 · 원본 보존" }.into(); })?;
                         }
                     }
                 } else if let Some((_, raw)) = line.split_once("__YTLR_INFO__") {
@@ -480,14 +511,14 @@ pub async fn capture(
                     }
                 } else {
                     let lower = line.to_ascii_lowercase();
-                    if lower.contains("skipping") || lower.contains("fragment not found") || lower.contains("non-monoton") || lower.contains("failed to open segment") {
+                    if reports_media_gap(&line, job.kind) {
                         store.update_job(&job.id, |j| { j.continuity_uncertain = true; })?;
                         store.event(&job.id, "gap", &arguments.auth.scrub(&line))?;
                     } else if lower.contains("error") || lower.contains("warning") {
                         store.event(&job.id, "engine", &arguments.auth.scrub(&line))?;
                         if !interrupted { reason = arguments.auth.scrub(&line); }
                     }
-                    if line.starts_with("[Merger]") || line.starts_with("[VideoRemuxer]") {
+                    if line.starts_with("__YTLR_FINALIZING__") || line.starts_with("[Merger]") || line.starts_with("[VideoRemuxer]") {
                         finalizing = true;
                         store.update_job(&job.id, |j| { j.state = JobState::Finalizing; j.message = "병합 중 · 원본 유지".into(); })?;
                     }
@@ -523,8 +554,15 @@ pub async fn capture(
                     }
                 }
                 let disk_low = fs2_free(&attempt).is_some_and(|n| n < settings.min_free_bytes);
-                let missing_track = !ffmpeg_mode && info.expected_tracks > tracker.tracks.len() && started.elapsed().as_secs() > settings.stall_timeout_secs;
-                if !interrupted && (disk_low || (!finalizing && (missing_track || tracker.stalled(Instant::now(), started, Duration::from_secs(settings.stall_timeout_secs))))) {
+                let missing_track = job.kind == JobKind::Live && !ffmpeg_mode && info.expected_tracks > tracker.tracks.len() && started.elapsed().as_secs() > settings.stall_timeout_secs;
+                // VOD tracks arrive sequentially, unlike simultaneous live streams.
+                let timeout = Duration::from_secs(settings.stall_timeout_secs);
+                let stalled = if job.kind == JobKind::Download {
+                    tracker.download_stalled(Instant::now(), started, timeout)
+                } else {
+                    tracker.stalled(Instant::now(), started, timeout)
+                };
+                if !interrupted && (disk_low || (!finalizing && (missing_track || stalled))) {
                     reason = if disk_low { "저장 공간 부족" } else { "영상 또는 음성 수신 정지 감지" }.into();
                     interrupted = true;
                     lifetime_pipe.take();
@@ -572,6 +610,31 @@ fn fs2_free(path: &Path) -> Option<u64> {
 mod tests {
     use super::*;
     #[test]
+    fn extractor_warnings_and_download_retries_are_not_missing_media() {
+        for kind in [JobKind::Live, JobKind::Download] {
+            assert!(!reports_media_gap(
+                "WARNING: [youtube] Skipping client web since it does not support cookies",
+                kind
+            ));
+            assert!(reports_media_gap(
+                "[download] fragment not found; Skipping fragment 12 ...",
+                kind
+            ));
+            assert!(reports_media_gap(
+                "Non-monotonous DTS in output stream",
+                kind
+            ));
+        }
+        assert!(!reports_media_gap(
+            "WARNING: fragment not found; retrying (1/5)",
+            JobKind::Download
+        ));
+        assert!(reports_media_gap(
+            "WARNING: fragment not found",
+            JobKind::Live
+        ));
+    }
+    #[test]
     fn audio_capture_requires_audio_but_not_video() {
         let options = RecordingOptions {
             audio_only: true,
@@ -613,6 +676,17 @@ mod tests {
         p.observe("audio", 20, start + Duration::from_secs(40));
         assert!(p.stalled(
             start + Duration::from_secs(41),
+            start,
+            Duration::from_secs(30)
+        ));
+        // A VOD audio download can keep progressing after its video track finished.
+        assert!(!p.download_stalled(
+            start + Duration::from_secs(41),
+            start,
+            Duration::from_secs(30)
+        ));
+        assert!(p.download_stalled(
+            start + Duration::from_secs(71),
             start,
             Duration::from_secs(30)
         ));

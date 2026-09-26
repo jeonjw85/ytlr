@@ -103,7 +103,9 @@ export default function App() {
     message: string;
     error: boolean;
   } | null>(null);
-  const [add, setAdd] = useState<"record" | "channel" | "remote" | null>(null);
+  const [add, setAdd] = useState<
+    "record" | "download" | "channel" | "remote" | null
+  >(null);
   const [remotes, setRemotes] = useState<Remote[]>([]);
   const [connection, setConnection] = useState("local");
   const [detail, setDetail] = useState<string | null>(null);
@@ -445,16 +447,28 @@ export default function App() {
               <h1>{t(pageInfo[page])}</h1>
             </div>
             {page !== "settings" && (
-              <button
-                className="button primary"
-                onClick={() =>
-                  setAdd(page === "channels" ? "channel" : "record")
-                }
-                disabled={!snapshot || !!connectionError || busy}
-              >
-                <Plus size={17} />
-                {t(page === "channels" ? "채널 추가" : "새 녹화")}
-              </button>
+              <div className="page-actions">
+                {page !== "channels" && (
+                  <button
+                    className="button"
+                    onClick={() => setAdd("download")}
+                    disabled={!snapshot || !!connectionError || busy}
+                  >
+                    <Download size={17} />
+                    {t("영상 다운로드")}
+                  </button>
+                )}
+                <button
+                  className="button primary"
+                  onClick={() =>
+                    setAdd(page === "channels" ? "channel" : "record")
+                  }
+                  disabled={!snapshot || !!connectionError || busy}
+                >
+                  <Plus size={17} />
+                  {t(page === "channels" ? "채널 추가" : "새 녹화")}
+                </button>
+              </div>
             )}
           </div>
 
@@ -857,7 +871,9 @@ export default function App() {
             notify(
               add === "channel"
                 ? "채널 감시를 시작합니다."
-                : "녹화 작업을 추가했습니다.",
+                : add === "download"
+                  ? "다운로드 작업을 추가했습니다."
+                  : "녹화 작업을 추가했습니다.",
             );
           }}
         />
@@ -985,7 +1001,11 @@ function Badge({ job }: { job: Job }) {
       ) : (
         <Circle size={9} />
       )}{" "}
-      {t(stateLabels[job.state])}
+      {t(
+        job.kind === "download" && job.state === "recording"
+          ? "다운로드 중"
+          : stateLabels[job.state],
+      )}
     </span>
   );
 }
@@ -1013,10 +1033,15 @@ function JobCard({
         <div className="job-title">
           <div className="job-channel">
             {job.channel || "YouTube"}
+            {job.kind === "download" && (
+              <span className="muted">{t("영상 다운로드")}</span>
+            )}
             <Badge job={job} />
           </div>
           <h3>
-            {job.title === "방송 정보 확인 대기" ? t(job.title) : job.title}
+            {["방송 정보 확인 대기", "영상 정보 확인 대기"].includes(job.title)
+              ? t(job.title)
+              : job.title}
           </h3>
           <p>
             <RecordingSummary options={job.recording_options} /> ·{" "}
@@ -1348,7 +1373,7 @@ function AddDialog({
   onClose,
   onSubmit,
 }: {
-  kind: "record" | "channel";
+  kind: "record" | "download" | "channel";
   fromStart: boolean;
   onClose: () => void;
   onSubmit: (path: string, body: unknown) => Promise<void>;
@@ -1371,15 +1396,20 @@ function AddDialog({
     setError("");
     try {
       await onSubmit(
-        kind === "record" ? "/jobs" : "/channels",
-        kind === "record"
+        kind === "download"
+          ? "/downloads"
+          : kind === "record"
+            ? "/jobs"
+            : "/channels",
+        kind !== "channel"
           ? {
+              kind: kind === "download" ? "download" : "live",
               url,
-              live_from_start: start,
+              live_from_start: kind === "download" ? false : start,
               priority: 0,
               recording_options: options,
-              stop_at: resolveDeadline(deadline),
-              schedule,
+              stop_at: kind === "download" ? null : resolveDeadline(deadline),
+              schedule: kind === "download" ? undefined : schedule,
             }
           : {
               url,
@@ -1397,24 +1427,32 @@ function AddDialog({
   }
   return (
     <Modal
-      title={t(kind === "record" ? "새 라이브 녹화" : "채널 추가")}
+      title={t(
+        kind === "download"
+          ? "영상 다운로드"
+          : kind === "record"
+            ? "새 라이브 녹화"
+            : "채널 추가",
+      )}
       onClose={onClose}
     >
       <form onSubmit={submit}>
         <p className="modal-intro">
           {t(
-            kind === "record"
-              ? "진행 중인 라이브 또는 예약 방송의 URL을 입력하세요."
-              : "등록한 채널의 새 라이브를 자동으로 녹화합니다.",
+            kind === "download"
+              ? "일반 유튜브 영상 또는 종료된 방송의 URL을 입력하세요. 완료된 파일은 보관함에 저장됩니다."
+              : kind === "record"
+                ? "진행 중인 라이브 또는 예약 방송의 URL을 입력하세요."
+                : "등록한 채널의 새 라이브를 자동으로 녹화합니다.",
           )}
         </p>
         <label className="field">
-          {t(kind === "record" ? "영상 URL" : "채널 URL")}
+          {t(kind !== "channel" ? "영상 URL" : "채널 URL")}
           <input
             required
             type="url"
             placeholder={
-              kind === "record"
+              kind !== "channel"
                 ? "https://www.youtube.com/watch?v=…"
                 : "https://www.youtube.com/@channel"
             }
@@ -1439,19 +1477,21 @@ function AddDialog({
             />
           </label>
         )}
-        <label className="check-field">
-          <input
-            type="checkbox"
-            checked={start}
-            onChange={(e) => setStart(e.target.checked)}
-          />
-          <div>
-            {t("가능하면 방송 처음부터 저장")}
-            <small>
-              {t("유튜브에서 제공하는 과거 구간 범위에 따라 달라집니다.")}
-            </small>
-          </div>
-        </label>
+        {kind !== "download" && (
+          <label className="check-field">
+            <input
+              type="checkbox"
+              checked={start}
+              onChange={(e) => setStart(e.target.checked)}
+            />
+            <div>
+              {t("가능하면 방송 처음부터 저장")}
+              <small>
+                {t("유튜브에서 제공하는 과거 구간 범위에 따라 달라집니다.")}
+              </small>
+            </div>
+          </label>
+        )}
         {error && (
           <p className="inline-error" role="alert">
             {t(error)}
@@ -1467,7 +1507,7 @@ function AddDialog({
             ) : (
               <Plus size={16} />
             )}
-            {t("추가하기")}
+            {t(kind === "download" ? "다운로드 시작" : "추가하기")}
           </button>
         </div>
       </form>

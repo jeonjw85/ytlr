@@ -2,6 +2,19 @@ import { automationEnglish } from "./automation.en";
 import { toolsEnglish } from "./tools.en";
 
 export const english: Record<string, string> = {
+  "영상 다운로드": "Download video",
+  "다운로드 시작": "Start download",
+  "다운로드 중": "Downloading",
+  "다운로드 작업을 추가했습니다.": "Download added.",
+  "영상 정보 확인 대기": "Waiting for video information",
+  "영상 정보 확인 중": "Checking video information",
+  "다운로드 대기": "Download queued",
+  "다운로드 연결 중": "Connecting for download",
+  "다운로드 중 · 원본 보존": "Downloading · keeping original files",
+  "일반 유튜브 영상 또는 종료된 방송의 URL을 입력하세요. 완료된 파일은 보관함에 저장됩니다.":
+    "Enter a YouTube video or archived broadcast URL. Completed files appear in the library.",
+  "다운로드 가능한 일반 영상 또는 종료된 방송이 아닙니다. 라이브·예약 방송은 새 녹화를 이용하세요.":
+    "This video is not available for download. Use New recording for live or upcoming broadcasts.",
   ...toolsEnglish,
   "앱 업데이트": "App updates",
   "새 버전을 확인할 수 있습니다.": "Ready to check for updates.",

@@ -157,8 +157,24 @@ impl RecordingOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JobKind {
+    #[default]
+    Live,
+    Download,
+}
+
+impl JobKind {
+    fn is_live(&self) -> bool {
+        *self == Self::Live
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingJob {
+    #[serde(default)]
+    pub kind: JobKind,
     #[serde(default)]
     pub schedule: crate::RecordingSchedule,
     #[serde(default)]
@@ -269,6 +285,9 @@ pub struct JobEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordRequest {
+    // Preserve canonical hashes for previously imported live schedules.
+    #[serde(default, skip_serializing_if = "JobKind::is_live")]
+    pub kind: JobKind,
     #[serde(default)]
     pub schedule: crate::RecordingSchedule,
     #[serde(default)]

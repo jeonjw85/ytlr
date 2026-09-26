@@ -79,6 +79,14 @@ impl CaptureOptions {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// 일반 영상 또는 종료된 방송 다운로드
+    Download {
+        url: String,
+        #[arg(long, conflicts_with = "max_height")]
+        audio_only: bool,
+        #[arg(long, value_parser = ["480", "720", "1080"])]
+        max_height: Option<String>,
+    },
     /// 라이브 URL 녹화 또는 예약 방송 대기
     Record {
         url: String,
@@ -588,6 +596,29 @@ async fn execute() -> Result<()> {
     }
     match args.command {
         Action::Start => println!("녹화 서비스 실행 중"),
+        Action::Download {
+            url,
+            audio_only,
+            max_height,
+        } => print_json(
+            &client
+                .post::<RecordingJob>(
+                    "/downloads",
+                    &RecordRequest {
+                        kind: JobKind::Download,
+                        url,
+                        recording_options: RecordingOptions {
+                            audio_only,
+                            max_height: max_height.map(|h| h.parse().expect("validated height")),
+                        },
+                        schedule: RecordingSchedule::default(),
+                        stop_at: None,
+                        live_from_start: Some(false),
+                        priority: 0,
+                    },
+                )
+                .await?,
+        )?,
         Action::Record {
             url,
             start_at,
@@ -600,6 +631,7 @@ async fn execute() -> Result<()> {
                 .post::<RecordingJob>(
                     "/jobs",
                     &RecordRequest {
+                        kind: JobKind::Live,
                         schedule: RecordingSchedule {
                             start_at,
                             duration_minutes,

@@ -32,6 +32,7 @@ export const channelErrorLabels: Record<string, string> = {
   extraction: "방송 정보 조회 오류",
 };
 export interface Job {
+  kind?: "live" | "download";
   schedule?: RecordingSchedule;
   protected?: boolean;
   finished_at?: string | null;

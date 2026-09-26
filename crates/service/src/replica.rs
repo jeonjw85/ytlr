@@ -28,6 +28,7 @@ async fn deliver(
         client
             .replica_record(
                 &RecordRequest {
+                    kind: job.kind,
                     schedule: job.schedule.clone(),
                     stop_at: job.stop_at.clone(),
                     recording_options: job.recording_options.clone(),
