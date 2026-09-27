@@ -21,11 +21,6 @@ The project is currently at **0.2.5** and is in stabilization testing.
 <p align="center">
   <img src="docs/recording.png" alt="YTLR recording a live stream" width="780">
 </p>
-<p align="center">
-  <img src="docs/home.png" alt="Recordings" width="250">
-  <img src="docs/channels.png" alt="Channels" width="250">
-  <img src="docs/library.png" alt="Library" width="250">
-</p>
 
 ## Highlights
 
