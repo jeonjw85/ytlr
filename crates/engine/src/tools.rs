@@ -2,6 +2,12 @@ use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "macos")]
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 use std::{
     io::Read,
     path::{Path, PathBuf},
@@ -11,14 +17,21 @@ use tokio::io::AsyncWriteExt;
 use ytlr_core::{AppPaths, ToolStatus, atomic_write};
 
 pub const BUNDLE_VERSION: &str = "2026-10-15";
-// Older macOS source builds did not include an MP3 encoder. Bundle names are date-prefixed.
-const MACOS_MP3_BUNDLE_VERSION: &str = "2026-10-15";
 const YTDLP: &str = "2026.08.19";
 const DENO: &str = "v2.9.7";
 
 #[derive(Clone)]
 pub struct Tools {
     pub paths: AppPaths,
+    #[cfg(target_os = "macos")]
+    mp3_support: Arc<Mutex<HashMap<PathBuf, Mp3Support>>>,
+}
+
+#[cfg(target_os = "macos")]
+struct Mp3Support {
+    modified: SystemTime,
+    size: u64,
+    available: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -157,7 +170,11 @@ pub fn executable_name(name: &str) -> String {
 
 impl Tools {
     pub fn new(paths: AppPaths) -> Self {
-        Self { paths }
+        Self {
+            paths,
+            #[cfg(target_os = "macos")]
+            mp3_support: Arc::default(),
+        }
     }
     pub fn locate(&self, name: &str) -> Option<PathBuf> {
         if let Some(p) = std::env::var_os(format!(
@@ -175,13 +192,16 @@ impl Tools {
         {
             let p = self.paths.tools_dir().join(&bundle.current).join(&exe);
             if p.is_file() {
-                if cfg!(target_os = "macos")
-                    && matches!(name, "ffmpeg" | "ffprobe")
-                    && bundle.current.as_str() < MACOS_MP3_BUNDLE_VERSION
+                #[cfg(target_os = "macos")]
+                if matches!(name, "ffmpeg" | "ffprobe")
                     && !bundle.rolled_back
-                    && let Some(bundled) = Self::bundled(name)
+                    && let Some(bundled_ffmpeg) = Self::bundled("ffmpeg")
+                    && let Some(bundled_dir) = bundled_ffmpeg.parent()
+                    && bundled_dir.join("ffprobe").is_file()
+                    && !self.ffmpeg_has_mp3_encoder(&p.with_file_name("ffmpeg"))
+                    && self.ffmpeg_has_mp3_encoder(&bundled_ffmpeg)
                 {
-                    return Some(bundled);
+                    return Some(bundled_dir.join(&exe));
                 }
                 return Some(p);
             }
@@ -194,6 +214,62 @@ impl Tools {
             })
         })
     }
+
+    #[cfg(target_os = "macos")]
+    fn ffmpeg_has_mp3_encoder(&self, path: &Path) -> bool {
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return false;
+        };
+        let Ok(modified) = metadata.modified() else {
+            return false;
+        };
+        let mut cache = self.mp3_support.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(status) = cache.get(path)
+            && status.modified == modified
+            && status.size == metadata.len()
+        {
+            return status.available;
+        }
+        let executable = path.to_owned();
+        // locate is synchronous and also called inside async tasks. Isolate the bounded
+        // probe runtime and cache by file metadata so normal tool lookup stays cheap.
+        let available = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            runtime.block_on(async {
+                let mut command = tokio::process::Command::new(executable);
+                command.args(["-hide_banner", "-encoders"]);
+                let output = crate::process::output_timeout(command, Duration::from_secs(5))
+                    .await
+                    .ok()?;
+                output.status.success().then(|| {
+                    String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                        // yt-dlp's MP3 postprocessor requests this encoder explicitly.
+                        line.split_whitespace().nth(1) == Some("libmp3lame")
+                    })
+                })
+            })
+        })
+        .join()
+        .ok()
+        .flatten();
+        // A failed probe says nothing about encoder support; let the next lookup retry.
+        let Some(available) = available else {
+            return false;
+        };
+        cache.insert(
+            path.to_owned(),
+            Mp3Support {
+                modified,
+                size: metadata.len(),
+                available,
+            },
+        );
+        available
+    }
+
     fn bundled(name: &str) -> Option<PathBuf> {
         let exe = executable_name(name);
         if let Some(root) = std::env::var_os("YTLR_BUNDLED_TOOLS") {
