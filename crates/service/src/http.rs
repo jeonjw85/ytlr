@@ -37,7 +37,13 @@ pub fn router(state: Arc<Service>) -> Router {
     Router::new()
         .route(
             "/health",
-            get(|| async { Json(json!({"ok":true,"version":env!("CARGO_PKG_VERSION")})) }),
+            get(|| async {
+                Json(json!({
+                    "ok": true, "version": env!("CARGO_PKG_VERSION"),
+                    "download_formats": [DownloadFormat::Mp4, DownloadFormat::Mkv,
+                        DownloadFormat::Webm, DownloadFormat::M4a, DownloadFormat::Mp3]
+                }))
+            }),
         )
         .route("/snapshot", get(snapshot))
         .route(
@@ -1404,6 +1410,36 @@ mod tests {
             .unwrap();
         assert!(state.store.job(&job.id).is_err());
         assert!(state.store.maintenance_events().unwrap().len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn client_can_create_downloads_in_each_supported_format() {
+        let (state, d) = service();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server =
+            tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+        let client = Client::new(AppPaths::resolve(Some(d.path().into())).unwrap())
+            .unwrap()
+            .with_endpoint(ServiceEndpoint {
+                port,
+                token: "test-token".into(),
+                pid: 0,
+                version: env!("CARGO_PKG_VERSION").into(),
+                api_version: SERVICE_API_VERSION,
+            });
+        for path in ["/downloads", "/jobs"] {
+            for (index, format) in ["mp4", "mkv", "webm", "m4a", "mp3"].into_iter().enumerate() {
+                let job: Value = client.post(path, &json!({
+                    "url": format!("https://youtu.be/format{index:05}"), "kind": "download", "download_format": format,
+                    "recording_options": {"audio_only": matches!(format, "m4a" | "mp3")}
+                })).await.unwrap();
+                assert_eq!(job["download_format"], format);
+                let snapshot: Value = client.get("/snapshot").await.unwrap();
+                assert!(snapshot["jobs"].as_array().unwrap().iter().any(|saved| saved["id"] == job["id"] && saved["download_format"] == format));
+            }
+        }
+        server.abort();
     }
 
     #[tokio::test]

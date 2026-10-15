@@ -123,6 +123,38 @@ impl Client {
             return Err(version_mismatch(&endpoint));
         }
         let send_json = !matches!(method, Method::GET | Method::HEAD | Method::DELETE);
+        let body = if send_json {
+            body.map(serde_json::to_value).transpose()?
+        } else {
+            None
+        };
+        let requested_format = if method == Method::POST && matches!(path, "/downloads" | "/jobs") {
+            body.as_ref()
+                .and_then(|value| value.get("download_format"))
+                .filter(|format| !format.is_null())
+        } else {
+            None
+        };
+        if let Some(format) = requested_format {
+            // Use the same endpoint for negotiation and submission, including SSH tunnels.
+            let health = self
+                .http
+                .get(format!("http://127.0.0.1:{}/health", endpoint.port))
+                .bearer_auth(&endpoint.token)
+                .header("x-ytlr-api-version", SERVICE_API_VERSION.to_string())
+                .send()
+                .await
+                .context("다운로드 형식 지원 여부를 확인할 수 없습니다.")?;
+            let health = decode_json(health).await?;
+            if !health["download_formats"]
+                .as_array()
+                .is_some_and(|formats| formats.contains(format))
+            {
+                bail!(
+                    "연결된 서비스가 선택한 다운로드 형식을 지원하지 않습니다. 해당 기기의 서비스를 업데이트하고 다시 시작해 주세요."
+                );
+            }
+        }
         let mut request = self
             .http
             .request(method, format!("http://127.0.0.1:{}{path}", endpoint.port))
@@ -136,16 +168,22 @@ impl Client {
         {
             request = request.timeout(Duration::from_secs(3600));
         }
-        if let Some(body) = body
-            && send_json
-        {
+        if let Some(body) = &body {
             request = request.json(body);
         }
         let response = request
             .send()
             .await
             .context("녹화 서비스에 연결할 수 없습니다.")?;
-        Ok(serde_json::from_value(decode_json(response).await?)?)
+        let value = decode_json(response).await?;
+        if let Some(format) = requested_format
+            && value.get("download_format") != Some(format)
+        {
+            bail!(
+                "서비스가 요청한 다운로드 형식을 저장하지 않았습니다. 작업 목록을 확인하고 서비스를 업데이트해 주세요."
+            );
+        }
+        Ok(serde_json::from_value(value)?)
     }
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         self.request(Method::GET, path, None::<&Value>).await
@@ -240,6 +278,115 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Model an older service: it accepts the request but drops unknown format fields.
+    async fn legacy_download_service(
+        health: Value,
+        remote: bool,
+    ) -> (
+        Client,
+        std::sync::Arc<ytlr_core::Store>,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+    ) {
+        let d = tempfile::tempdir().unwrap();
+        let paths = AppPaths::resolve(Some(d.path().into())).unwrap();
+        paths.initialize().unwrap();
+        let store = std::sync::Arc::new(
+            ytlr_core::Store::open(&paths.database(), &paths.default_settings()).unwrap(),
+        );
+        let old_download = {
+            let store = store.clone();
+            move |axum::Json(mut request): axum::Json<ytlr_core::RecordRequest>| async move {
+                request.download_format = None;
+                axum::Json(store.add_job(&request, None, false).unwrap())
+            }
+        };
+        let router = axum::Router::new()
+            .route(
+                "/health",
+                axum::routing::get(move || async move { axum::Json(health) }),
+            )
+            .route("/downloads", axum::routing::post(old_download.clone()))
+            .route("/jobs", axum::routing::post(old_download));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = ServiceEndpoint {
+            port: listener.local_addr().unwrap().port(),
+            token: "unused".into(),
+            pid: 0,
+            version: env!("CARGO_PKG_VERSION").into(),
+            api_version: SERVICE_API_VERSION,
+        };
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::new(paths.clone()).unwrap();
+        let client = if remote {
+            client.with_endpoint(endpoint)
+        } else {
+            ytlr_core::atomic_write(
+                &paths.root.join("service.json"),
+                &serde_json::to_vec(&endpoint).unwrap(),
+            )
+            .unwrap();
+            client
+        };
+        (client, store, task, d)
+    }
+
+    #[tokio::test]
+    async fn unsupported_download_format_does_not_create_a_legacy_job() {
+        for remote in [false, true] {
+            for health in [
+                serde_json::json!({"ok": true, "version": "0.2.5"}),
+                serde_json::json!({"ok": true, "version": "0.2.5", "download_formats": ["mkv"]}),
+            ] {
+                let (client, store, task, _d) = legacy_download_service(health, remote).await;
+                for path in ["/downloads", "/jobs"] {
+                    let result = client.post::<Value>(path, &serde_json::json!({
+                        "url": "https://youtu.be/vodvideo001", "kind": "download", "download_format": "mp4"
+                    })).await;
+                    assert!(
+                        store.jobs().unwrap().is_empty(),
+                        "unsupported format must be rejected before sending a mutating request"
+                    );
+                    assert!(result.unwrap_err().to_string().contains("업데이트"));
+                }
+                // Requests without a selected format keep the legacy contract.
+                let legacy: ytlr_core::RecordingJob = client
+                    .post(
+                        "/downloads",
+                        &serde_json::json!({
+                            "url": "https://youtu.be/vodvideo001", "kind": "download"
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(legacy.download_format, None);
+                assert_eq!(store.jobs().unwrap().len(), 1);
+                task.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn download_response_must_acknowledge_the_requested_format() {
+        for path in ["/downloads", "/jobs"] {
+            let (client, store, task, _d) = legacy_download_service(
+                serde_json::json!({"ok": true, "version": "0.2.5", "download_formats": ["mp4"]}),
+                true,
+            )
+            .await;
+            let result = client.post::<Value>(path, &serde_json::json!({
+                "url": "https://youtu.be/vodvideo001", "kind": "download", "download_format": "mp4"
+            })).await;
+            assert_eq!(store.jobs().unwrap().len(), 1);
+            assert!(
+                result.unwrap_err().to_string().contains("형식"),
+                "a discarded format must not be reported as success"
+            );
+            task.abort();
+        }
+    }
+
     #[tokio::test]
     async fn incompatible_service_is_not_mutated() {
         let d = tempfile::tempdir().unwrap();

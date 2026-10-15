@@ -252,6 +252,12 @@ export const english: Record<string, string> = {
   "요청 처리 실패": "The request could not be completed.",
   "녹화 서비스가 이 앱과 호환되지 않습니다. 녹화를 마무리하고 `ytlr shutdown` 후 다시 실행하세요.":
     "The recording service is not compatible with this app. Finish recordings, run `ytlr shutdown`, then start the app again.",
+  "다운로드 형식 지원 여부를 확인할 수 없습니다.":
+    "Unable to check download format support.",
+  "연결된 서비스가 선택한 다운로드 형식을 지원하지 않습니다. 해당 기기의 서비스를 업데이트하고 다시 시작해 주세요.":
+    "The connected service does not support the selected download format. Update and restart the service on that device.",
+  "서비스가 요청한 다운로드 형식을 저장하지 않았습니다. 작업 목록을 확인하고 서비스를 업데이트해 주세요.":
+    "The service did not save the requested download format. Check the job list and update the service.",
   "지원하지 않는 요청": "This request is not supported.",
   "원격 녹화 서비스에 연결할 수 없습니다.":
     "Cannot connect to the remote recording service.",
