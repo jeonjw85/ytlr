@@ -25,15 +25,16 @@ struct Stream {
 #[derive(Debug, Deserialize)]
 struct Format {
     duration: Option<String>,
+    format_name: Option<String>,
 }
 
-pub async fn probe(tools: &Tools, path: &Path) -> Result<MediaOutput> {
+async fn probe_info(tools: &Tools, path: &Path) -> Result<Probe> {
     let mut cmd = tokio::process::Command::new(tools.require("ffprobe")?);
     cmd.args([
         "-v",
         "error",
         "-show_entries",
-        "stream=codec_type,duration:format=duration",
+        "stream=codec_type,duration:format=duration,format_name",
         "-of",
         "json",
     ])
@@ -44,7 +45,30 @@ pub async fn probe(tools: &Tools, path: &Path) -> Result<MediaOutput> {
     if !result.status.success() {
         bail!("미디어 헤더 검사 실패");
     }
-    let data: Probe = serde_json::from_slice(&result.stdout)?;
+    Ok(serde_json::from_slice(&result.stdout)?)
+}
+
+pub async fn download_container_matches(
+    tools: &Tools,
+    path: &Path,
+    format: ytlr_core::DownloadFormat,
+) -> Result<bool> {
+    use ytlr_core::DownloadFormat;
+    let expected = match format {
+        DownloadFormat::Mp4 | DownloadFormat::M4a => "mp4",
+        DownloadFormat::Mkv => "matroska",
+        DownloadFormat::Webm => "webm",
+        DownloadFormat::Mp3 => "mp3",
+    };
+    Ok(probe_info(tools, path)
+        .await?
+        .format
+        .and_then(|format| format.format_name)
+        .is_some_and(|names| names.split(',').any(|name| name == expected)))
+}
+
+pub async fn probe(tools: &Tools, path: &Path) -> Result<MediaOutput> {
+    let data = probe_info(tools, path).await?;
     let duration = data
         .format
         .and_then(|f| f.duration)

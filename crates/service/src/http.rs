@@ -1086,6 +1086,67 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires ffmpeg and ffprobe; run explicitly with media tools"]
+    async fn download_completion_requires_the_requested_container_not_just_its_extension() {
+        let (state, _d) = service();
+        for (container, expected_state) in
+            [("mpegts", JobState::Partial), ("mp4", JobState::Completed)]
+        {
+            let request = serde_json::from_value(serde_json::json!({
+                "url": "https://youtu.be/vodhls00001", "kind": "download", "download_format": "mp4"
+            }))
+            .unwrap();
+            let job = state.store.add_job(&request, None, false).unwrap();
+            let attempt = job.output_dir.join("attempt-0001");
+            std::fs::create_dir_all(&attempt).unwrap();
+            let output = attempt.join("source.mp4");
+            let generated = std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=160x90:rate=10",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=sample_rate=48000",
+                    "-t",
+                    "1",
+                    "-c:v",
+                    "libx264",
+                    "-c:a",
+                    "aac",
+                    "-f",
+                    container,
+                ])
+                .arg(&output)
+                .output()
+                .unwrap();
+            assert!(
+                generated.status.success(),
+                "{}",
+                String::from_utf8_lossy(&generated.stderr)
+            );
+            state.store.update_job(&job.id, |j| j.attempt = 1).unwrap();
+            scheduler::finish(&state, &job.id, true).await.unwrap();
+            let finished = state.store.job(&job.id).unwrap();
+            assert_eq!(
+                finished.state, expected_state,
+                "{container}: {}",
+                finished.message
+            );
+            assert_eq!(finished.outputs.len(), 1);
+            assert_eq!(finished.outputs[0].path, output);
+            assert!(
+                output.exists(),
+                "mismatched but playable originals must be preserved"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn downloaded_mp3_is_available_in_file_catalog_and_metadata() {
         let (state, _d) = service();
         let job = completed_job(&state);

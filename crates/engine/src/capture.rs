@@ -242,7 +242,7 @@ pub fn capture_args(
         "--no-playlist", "--no-simulate", "--newline", "--progress", "--progress-delta", "1",
         "--keep-fragments", "--keep-video", "--no-overwrites", "--no-post-overwrites",
         "--fragment-retries", "5", "--retry-sleep", "fragment:exp=1:10", "--concurrent-fragments", "2",
-        "--fixup", "never",
+        "--fixup", if job.kind == JobKind::Download && job.download_format.is_some() { "detect_or_warn" } else { "never" },
         "--progress-template", "download:__YTLR_PROGRESS__{\"bytes\":%(progress.downloaded_bytes)j,\"track\":%(info.format_id)j,\"status\":%(progress.status)j}",
         "--print", "before_dl:__YTLR_INFO__%(.{id,title,channel,format,resolution,format_id})j",
         // --print enables quiet mode, which suppresses ordinary [Merger] messages.

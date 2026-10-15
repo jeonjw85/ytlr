@@ -470,14 +470,20 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
         .filter(|gap| gap.status != GapStatus::Recovered)
         .count();
     let stopped = job.stop_requested;
-    let format_ok = job.download_format.is_none_or(|format| {
-        outputs.iter().all(|output| {
-            output
+    let mut format_ok = true;
+    if let Some(format) = job.download_format {
+        for output in &outputs {
+            if !output
                 .path
                 .extension()
                 .is_some_and(|ext| ext == format.extension())
-        })
-    });
+                || !download_container_matches(&state.tools, &output.path, format).await?
+            {
+                format_ok = false;
+                break;
+            }
+        }
+    }
     let complete = integrity_ok
         && natural_end
         && !stopped
