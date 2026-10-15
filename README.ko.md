@@ -251,19 +251,24 @@ ytlr operation clip JOB_ID attempt-0001/recording-OUTPUT_ID.mkv --start 30 --end
 
 **영상 다운로드**에서 일반 유튜브 영상 또는 다시보기가 제공되는 종료된 방송의 URL을
 입력하세요. 최고 화질·1080p·720p·480p 또는 음성만 저장을 선택할 수 있습니다.
+**파일 형식**에서 영상은 MP4(기본)·MKV·WebM, 음성은 M4A(기본)·MP3를 선택합니다.
+영상은 선택한 형식·화질에 맞는 스트림을 재인코딩 없이 저장합니다. 해당 스트림이 없으면
+오류를 안내합니다. 음성은 필요한 경우 선택한 형식으로 변환하므로 처리 시간이 추가됩니다.
 작업은 녹화 목록에서 확인·중지하고, 완료된 파일은 보관함에서 열거나 내보낼 수 있습니다.
 저장 위치와 인증 파일은 기존 설정을 사용하며, 원격 연결 중에는 선택한 서버에 저장합니다.
 라이브·예약 방송은 **새 녹화**를 이용하세요.
 
 다운로드는 앱을 닫아도 서비스에서 처리하며 동시 녹화 상한과 저장 공간 제한을 공유합니다.
 실패·서비스 재시작 후에는 이전 파일을 보존하고 새 시도에서 처음부터 다시 받습니다.
-재시도 성공 시 보관함에는 마지막 시도의 결과를 표시합니다. 영상은 MKV로 저장하며,
-호환되는 결과는 기존 내보내기 기능으로 MP4로 변환할 수 있습니다.
+재시도 성공 시 보관함에는 마지막 시도의 선택한 형식 결과를 표시합니다.
+형식 옵션이 없는 기존 작업과 API 요청은 기존 MKV 저장 방식을 사용합니다.
 
 ```sh
 ytlr download 'https://youtu.be/VIDEO_ID'
 ytlr download 'https://youtu.be/VIDEO_ID' --max-height 720
+ytlr download 'https://youtu.be/VIDEO_ID' --format webm --max-height 720
 ytlr download 'https://youtu.be/VIDEO_ID' --audio-only
+ytlr download 'https://youtu.be/VIDEO_ID' --audio-only --format mp3
 ```
 
 기존 서비스에 `/downloads` API가 없으면 서비스를 업데이트하고 재시작해야 합니다.

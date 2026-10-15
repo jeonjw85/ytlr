@@ -171,10 +171,79 @@ impl JobKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadFormat {
+    Mp4,
+    Mkv,
+    Webm,
+    Mp3,
+    M4a,
+}
+
+impl DownloadFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Mkv => "mkv",
+            Self::Webm => "webm",
+            Self::Mp3 => "mp3",
+            Self::M4a => "m4a",
+        }
+    }
+
+    pub fn audio_only(self) -> bool {
+        matches!(self, Self::Mp3 | Self::M4a)
+    }
+
+    pub fn validate(self, kind: JobKind, options: &RecordingOptions) -> Result<()> {
+        if kind != JobKind::Download {
+            bail!("파일 형식은 영상 다운로드에서만 선택할 수 있습니다.");
+        }
+        if self.audio_only() != options.audio_only {
+            bail!("영상은 MP4·MKV·WebM, 음성만 저장은 MP3·M4A를 선택하세요.");
+        }
+        Ok(())
+    }
+
+    pub fn format_selector(self, options: &RecordingOptions) -> String {
+        match self {
+            Self::Mkv | Self::Mp3 => options.format_selector(),
+            Self::M4a => "ba[ext=m4a]/ba".into(),
+            Self::Mp4 | Self::Webm => {
+                let video = self.extension();
+                let audio = if self == Self::Mp4 { "m4a" } else { "webm" };
+                let height = options
+                    .max_height
+                    .map(|h| format!("[height<={h}]"))
+                    .unwrap_or_default();
+                format!("bv*[ext={video}]{height}+ba[ext={audio}]/b[ext={video}]{height}")
+            }
+        }
+    }
+}
+
+impl std::str::FromStr for DownloadFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "mp4" => Ok(Self::Mp4),
+            "mkv" => Ok(Self::Mkv),
+            "webm" => Ok(Self::Webm),
+            "mp3" => Ok(Self::Mp3),
+            "m4a" => Ok(Self::M4a),
+            _ => bail!("파일 형식은 mp4, mkv, webm, mp3, m4a 중에서 선택하세요."),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingJob {
     #[serde(default)]
     pub kind: JobKind,
+    #[serde(default)]
+    pub download_format: Option<DownloadFormat>,
     #[serde(default)]
     pub schedule: crate::RecordingSchedule,
     #[serde(default)]
@@ -288,6 +357,8 @@ pub struct RecordRequest {
     // Preserve canonical hashes for previously imported live schedules.
     #[serde(default, skip_serializing_if = "JobKind::is_live")]
     pub kind: JobKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_format: Option<DownloadFormat>,
     #[serde(default)]
     pub schedule: crate::RecordingSchedule,
     #[serde(default)]
@@ -299,6 +370,16 @@ pub struct RecordRequest {
     pub live_from_start: Option<bool>,
     #[serde(default)]
     pub priority: i32,
+}
+
+impl RecordRequest {
+    pub fn validate_options(&self) -> Result<()> {
+        self.recording_options.validate()?;
+        if let Some(format) = self.download_format {
+            format.validate(self.kind, &self.recording_options)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

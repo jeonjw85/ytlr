@@ -89,6 +89,11 @@ if (!debug) {
     const sources = join(tauri, "resources/tools/sources");
     await mkdir(sources, { recursive: true });
     await copyFile(builtFfmpeg.archive, join(sources, "ffmpeg-9.0.2.tar.xz"));
+    await copyFile(builtFfmpeg.lameArchive, join(sources, "lame-4.0.tar.gz"));
+    await copyFile(
+      join(builtFfmpeg.lameSource, "COPYING"),
+      join(tauri, "resources/tools/LAME-LICENSE.txt"),
+    );
     await copyFile(
       join(root, "packaging/build-ffmpeg.mjs"),
       join(sources, "build-ffmpeg.mjs"),

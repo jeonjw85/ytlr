@@ -4,6 +4,20 @@ import { toolsEnglish } from "./tools.en";
 export const english: Record<string, string> = {
   "영상 다운로드": "Download video",
   "다운로드 시작": "Start download",
+  "파일 형식": "File format",
+  "선택한 음성 형식으로 저장합니다. 필요한 경우 변환 시간이 추가됩니다.":
+    "Saves in the selected audio format. Conversion may take additional time.",
+  "선택한 형식과 화질에 맞는 스트림을 재인코딩 없이 저장합니다.":
+    "Saves streams matching the selected format and quality without re-encoding.",
+  "파일 형식은 영상 다운로드에서만 선택할 수 있습니다.":
+    "File format selection is only available for video downloads.",
+  "영상은 MP4·MKV·WebM, 음성만 저장은 MP3·M4A를 선택하세요.":
+    "Choose MP4, MKV, or WebM for video; MP3 or M4A for audio only.",
+  "선택한 파일 형식과 화질에 맞는 스트림이 없습니다. 다른 형식이나 화질을 선택하세요.":
+    "No streams match the selected file format and quality. Choose another format or quality.",
+  "병합·변환 중 · 원본 유지": "Merging/converting · keeping original files",
+  "부분 보관 · 선택한 파일 형식으로 저장하지 못했습니다. 원본을 보존합니다.":
+    "Partial · could not save in the selected file format. Original files are preserved.",
   "다운로드 중": "Downloading",
   "다운로드 작업을 추가했습니다.": "Download added.",
   "영상 정보 확인 대기": "Waiting for video information",

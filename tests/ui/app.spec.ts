@@ -130,6 +130,8 @@ test("GUI persists language and controls the real Rust service: create, deduplic
   const downloadDialog = page.getByRole("dialog", { name: "Download video" });
   await expect(downloadDialog).toBeVisible();
   await expect(downloadDialog.getByRole("checkbox")).toHaveCount(0);
+  await expect(page.getByLabel("File format")).toHaveValue("mp4");
+  await page.getByLabel("File format").selectOption("webm");
   await page.getByLabel("Video URL").fill("https://youtu.be/vodvideo001");
   await page.getByLabel("Maximum quality").selectOption("720");
   await page
@@ -141,11 +143,36 @@ test("GUI persists language and controls the real Rust service: create, deduplic
   expect(download.kind).toBe("download");
   expect(download.live_from_start).toBe(false);
   expect(download.recording_options.max_height).toBe(720);
+  expect(download.download_format).toBe("webm");
   await page.reload();
   await expect(page.locator(".job-card")).toContainText("Download video");
   await page.getByRole("button", { name: "Stop", exact: true }).click();
   await expect(page.locator(".job-card")).toHaveCount(0);
   await call(`/jobs/${download.id}`, "DELETE");
+  await page
+    .getByRole("button", { name: "Download video", exact: true })
+    .click();
+  await page.getByLabel("Recording mode").selectOption("audio");
+  await expect(page.getByLabel("File format")).toHaveValue("m4a");
+  await expect(page.getByLabel("Maximum quality")).toHaveCount(0);
+  await page.getByLabel("File format").selectOption("mp3");
+  await page.getByLabel("Recording mode").selectOption("video");
+  await expect(page.getByLabel("File format")).toHaveValue("mp4");
+  await page.getByLabel("Recording mode").selectOption("audio");
+  await page.getByLabel("File format").selectOption("mp3");
+  await page.getByLabel("Video URL").fill("https://youtu.be/vodaudio001");
+  await page
+    .getByRole("button", { name: "Start download", exact: true })
+    .click();
+  await expect(downloadDialog).toHaveCount(0);
+  const audioDownload = (await call("/snapshot")).jobs[0];
+  expect(audioDownload.download_format).toBe("mp3");
+  expect(audioDownload.recording_options).toEqual({
+    audio_only: true,
+    max_height: null,
+  });
+  await call(`/jobs/${audioDownload.id}/stop`, "POST", {});
+  await call(`/jobs/${audioDownload.id}`, "DELETE");
   await page
     .getByRole("button", { name: "New recording", exact: true })
     .click();

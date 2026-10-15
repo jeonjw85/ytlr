@@ -250,6 +250,10 @@ The existing synchronous `export`, `clip`, and `cleanup` commands remain availab
 Use **Download video** to save a regular YouTube video or an archived broadcast.
 Choose best quality, a 1080p/720p/480p cap, or audio only. Monitor and stop downloads
 in the recordings view, then open or export completed files from the library.
+Choose **File format**: MP4 (default), MKV, or WebM for video; M4A (default) or MP3
+for audio. Video uses matching streams without re-encoding and reports an error if
+the requested format/quality is unavailable. Audio is converted when needed, which
+can take additional processing time.
 Downloads use the configured storage location and authentication files. When
 connected to a remote server, files are saved on that server. Use **New recording**
 for live or upcoming broadcasts.
@@ -257,13 +261,15 @@ for live or upcoming broadcasts.
 The service continues downloading after the app closes, sharing the recording
 concurrency and disk-space limits. After a failure or service restart, it preserves
 previous files and downloads from the beginning in a new attempt directory. After
-a successful retry, the library shows the latest attempt's result. Video is saved
-as MKV; compatible results can be exported to MP4 using the existing export action.
+a successful retry, the library shows the latest attempt's result in the selected
+format. Existing jobs and API requests without a format retain the MKV default.
 
 ```sh
 ytlr download 'https://youtu.be/VIDEO_ID'
 ytlr download 'https://youtu.be/VIDEO_ID' --max-height 720
+ytlr download 'https://youtu.be/VIDEO_ID' --format webm --max-height 720
 ytlr download 'https://youtu.be/VIDEO_ID' --audio-only
+ytlr download 'https://youtu.be/VIDEO_ID' --audio-only --format mp3
 ```
 
 Update and restart an older service if it does not provide the `/downloads` API.

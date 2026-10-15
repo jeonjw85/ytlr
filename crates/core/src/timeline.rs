@@ -148,6 +148,7 @@ mod tests {
     fn job() -> RecordingJob {
         RecordingJob {
             kind: JobKind::Live,
+            download_format: None,
             schedule: crate::RecordingSchedule::default(),
             protected: false,
             finished_at: None,

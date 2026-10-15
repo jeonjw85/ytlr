@@ -10,7 +10,9 @@ use std::{
 use tokio::io::AsyncWriteExt;
 use ytlr_core::{AppPaths, ToolStatus, atomic_write};
 
-pub const BUNDLE_VERSION: &str = "2026-09-21.2";
+pub const BUNDLE_VERSION: &str = "2026-10-15";
+// Older macOS source builds did not include an MP3 encoder. Bundle names are date-prefixed.
+const MACOS_MP3_BUNDLE_VERSION: &str = "2026-10-15";
 const YTDLP: &str = "2026.08.19";
 const DENO: &str = "v2.9.7";
 
@@ -23,6 +25,8 @@ pub struct Tools {
 struct ActiveBundle {
     current: String,
     previous: Option<String>,
+    #[serde(default)]
+    rolled_back: bool,
 }
 
 #[derive(Clone)]
@@ -169,11 +173,29 @@ impl Tools {
         if let Ok(raw) = std::fs::read(self.paths.tools_dir().join("active.json"))
             && let Ok(bundle) = serde_json::from_slice::<ActiveBundle>(&raw)
         {
-            let p = self.paths.tools_dir().join(bundle.current).join(&exe);
+            let p = self.paths.tools_dir().join(&bundle.current).join(&exe);
             if p.is_file() {
+                if cfg!(target_os = "macos")
+                    && matches!(name, "ffmpeg" | "ffprobe")
+                    && bundle.current.as_str() < MACOS_MP3_BUNDLE_VERSION
+                    && !bundle.rolled_back
+                    && let Some(bundled) = Self::bundled(name)
+                {
+                    return Some(bundled);
+                }
                 return Some(p);
             }
         }
+        Self::bundled(name).or_else(|| {
+            std::env::var_os("PATH").and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|p| p.join(&exe))
+                    .find(|p| p.is_file())
+            })
+        })
+    }
+    fn bundled(name: &str) -> Option<PathBuf> {
+        let exe = executable_name(name);
         if let Some(root) = std::env::var_os("YTLR_BUNDLED_TOOLS") {
             let path = PathBuf::from(root).join(&exe);
             if path.is_file() {
@@ -194,11 +216,7 @@ impl Tools {
                 }
             }
         }
-        std::env::var_os("PATH").and_then(|paths| {
-            std::env::split_paths(&paths)
-                .map(|p| p.join(&exe))
-                .find(|p| p.is_file())
-        })
+        None
     }
     pub fn require(&self, name: &str) -> Result<PathBuf> {
         self.locate(name).with_context(|| format!("{name}이 없습니다. 설정에서 녹화 엔진을 설치하거나 `ytlr tools install`을 실행하세요."))
@@ -345,6 +363,7 @@ impl Tools {
             &serde_json::to_vec(&ActiveBundle {
                 current: bundle,
                 previous,
+                rolled_back: false,
             })?,
         )?;
         progress("녹화 엔진 설치 완료".into());
@@ -359,25 +378,26 @@ impl Tools {
             &serde_json::to_vec(&ActiveBundle {
                 current: previous,
                 previous: Some(bundle.current),
+                rolled_back: true,
             })?,
         )
     }
 
     pub async fn redistributable_tool(&self, name: &str) -> Result<PathBuf> {
         let mut candidates = vec![];
-        if let Some(path) = self.locate(name) {
+        // An explicit build override wins; reinstall otherwise takes the current app bundle,
+        // rather than copying an older managed engine back into a newly named installation.
+        if let Some(path) = std::env::var_os(format!(
+            "YTLR_{}",
+            name.replace('-', "_").to_ascii_uppercase()
+        )) {
+            candidates.push(PathBuf::from(path));
+        }
+        if let Some(path) = Self::bundled(name) {
             candidates.push(path);
         }
-        if let Some(root) = std::env::var_os("YTLR_BUNDLED_TOOLS") {
-            candidates.push(PathBuf::from(root).join(executable_name(name)));
-        }
-        if let Ok(exe) = std::env::current_exe()
-            && let Some(parent) = exe.parent()
-        {
-            candidates.extend([
-                parent.join("tools").join(name),
-                parent.join("../Resources/tools").join(name),
-            ]);
+        if let Some(path) = self.locate(name) {
+            candidates.push(path);
         }
         if let Some(paths) = std::env::var_os("PATH") {
             candidates.extend(std::env::split_paths(&paths).map(|p| p.join(executable_name(name))));

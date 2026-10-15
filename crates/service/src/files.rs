@@ -44,7 +44,7 @@ pub fn media_path(job: &RecordingJob, path: &str) -> Result<PathBuf> {
     }
     if !matches!(
         candidate.extension().and_then(|s| s.to_str()),
-        Some("mkv" | "mp4" | "mka" | "m4a" | "webm" | "opus")
+        Some("mkv" | "mp4" | "mka" | "m4a" | "webm" | "opus" | "mp3")
     ) {
         bail!("지원하지 않는 미디어 파일입니다.");
     }

@@ -86,6 +86,9 @@ enum Action {
         audio_only: bool,
         #[arg(long, value_parser = ["480", "720", "1080"])]
         max_height: Option<String>,
+        /// File format: mp4 (default), mkv, webm; with --audio-only: m4a (default), mp3.
+        #[arg(long)]
+        format: Option<DownloadFormat>,
     },
     /// 라이브 URL 녹화 또는 예약 방송 대기
     Record {
@@ -600,12 +603,18 @@ async fn execute() -> Result<()> {
             url,
             audio_only,
             max_height,
+            format,
         } => print_json(
             &client
                 .post::<RecordingJob>(
                     "/downloads",
                     &RecordRequest {
                         kind: JobKind::Download,
+                        download_format: Some(format.unwrap_or(if audio_only {
+                            DownloadFormat::M4a
+                        } else {
+                            DownloadFormat::Mp4
+                        })),
                         url,
                         recording_options: RecordingOptions {
                             audio_only,
@@ -632,6 +641,7 @@ async fn execute() -> Result<()> {
                     "/jobs",
                     &RecordRequest {
                         kind: JobKind::Live,
+                        download_format: None,
                         schedule: RecordingSchedule {
                             start_at,
                             duration_minutes,

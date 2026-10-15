@@ -155,7 +155,7 @@ async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationTok
     let (cookie_file, po_token) = auth(&state);
     let info = tokio::select! {
         _ = cancel.cancelled() => { interrupted_state(&state, &job.id)?; return Ok(()); },
-        result = inspect(&state.tools, &job.url, &job.recording_options, cookie_file.as_deref(), po_token.as_deref()) => result,
+        result = inspect(&state.tools, &job.url, &job.recording_options, job.download_format, cookie_file.as_deref(), po_token.as_deref()) => result,
     };
     let info = match info {
         Ok(info) => info,
@@ -271,6 +271,7 @@ async fn run_job(state: Arc<Service>, job: RecordingJob, cancel: CancellationTok
             &state.tools,
             &job.url,
             &job.recording_options,
+            None,
             auth(&state).0.as_deref(),
             auth(&state).1.as_deref(),
         )
@@ -387,7 +388,7 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
     let mut outputs = if job.kind == JobKind::Download {
         vec![]
     } else {
-        discover_outputs(&state.tools, &job.output_dir, &job.recording_options).await?
+        discover_outputs(&state.tools, &job.output_dir, &job.recording_options, None).await?
     };
     let mut attempts: Vec<_> = (1..=job.attempt).collect();
     if job.kind == JobKind::Download {
@@ -407,7 +408,13 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
         }
         if job.kind == JobKind::Download {
             // A failed/empty retry must not hide the previous playable result.
-            outputs = discover_outputs(&state.tools, &dir, &job.recording_options).await?;
+            outputs = discover_outputs(
+                &state.tools,
+                &dir,
+                &job.recording_options,
+                job.download_format,
+            )
+            .await?;
             if !outputs.is_empty() {
                 break;
             }
@@ -463,12 +470,21 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
         .filter(|gap| gap.status != GapStatus::Recovered)
         .count();
     let stopped = job.stop_requested;
+    let format_ok = job.download_format.is_none_or(|format| {
+        outputs.iter().all(|output| {
+            output
+                .path
+                .extension()
+                .is_some_and(|ext| ext == format.extension())
+        })
+    });
     let complete = integrity_ok
         && natural_end
         && !stopped
         && !job.continuity_uncertain
         && (job.kind == JobKind::Download || job.attempt == 1)
         && open_gaps == 0
+        && format_ok
         && !outputs.is_empty();
     let job = state.store.update_job(id, |j| {
         if integrity_ok && !outputs.is_empty() && open_gaps == 0 {
@@ -495,6 +511,8 @@ pub async fn finish(state: &Service, id: &str, natural_end: bool) -> Result<()> 
             }
         } else if stopped {
             "중지했습니다. 저장된 파일은 보관됩니다.".into()
+        } else if !format_ok {
+            "부분 보관 · 선택한 파일 형식으로 저장하지 못했습니다. 원본을 보존합니다.".into()
         } else if open_gaps > 0 {
             format!("부분 보관 · 수신 공백/경계 미검증 {open_gaps}구간 · 원본 보존")
         } else {
@@ -530,6 +548,7 @@ async fn fill_gaps(state: &Service, id: &str) -> Result<()> {
         &state.tools,
         &job.url,
         &job.recording_options,
+        None,
         cookie_file.as_deref(),
         po_token.as_deref(),
     ) => result }
@@ -679,7 +698,7 @@ pub async fn monitor(state: Arc<Service>) {
                         channel.recording_options = current.recording_options;
                         channel.live_from_start = current.live_from_start;
                         channel.priority = current.priority;
-                        let info = tokio::select! { _ = state.shutdown.cancelled() => return, r = inspect(&state.tools, &url, &channel.recording_options, cookie_file.as_deref(), po_token.as_deref()) => r };
+                        let info = tokio::select! { _ = state.shutdown.cancelled() => return, r = inspect(&state.tools, &url, &channel.recording_options, None, cookie_file.as_deref(), po_token.as_deref()) => r };
                         let info = match info {
                             Ok(info) => info,
                             Err(e) => {
@@ -711,6 +730,7 @@ pub async fn monitor(state: Arc<Service>) {
                         );
                         let request = RecordRequest {
                             kind: JobKind::Live,
+                            download_format: None,
                             schedule: RecordingSchedule {
                                 start_at: None,
                                 duration_minutes: channel.rules.duration_minutes,

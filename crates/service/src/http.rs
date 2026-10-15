@@ -1039,6 +1039,7 @@ mod tests {
             .add_job(
                 &RecordRequest {
                     kind: JobKind::Live,
+                    download_format: None,
                     schedule: RecordingSchedule::default(),
                     stop_at: None,
                     recording_options: RecordingOptions::default(),
@@ -1082,6 +1083,54 @@ mod tests {
             .await
             .unwrap();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn downloaded_mp3_is_available_in_file_catalog_and_metadata() {
+        let (state, _d) = service();
+        let job = completed_job(&state);
+        let path = job.output_dir.join("attempt-0001/source.mp3");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"downloaded audio").unwrap();
+        state
+            .store
+            .update_job(&job.id, |j| {
+                j.kind = JobKind::Download;
+                j.download_format = Some(DownloadFormat::Mp3);
+                j.recording_options.audio_only = true;
+                j.outputs = vec![MediaOutput {
+                    path,
+                    bytes: 16,
+                    duration: 1.0,
+                    has_video: false,
+                    has_audio: true,
+                    verification: "container_probe".into(),
+                    sha256: None,
+                }];
+            })
+            .unwrap();
+        let (status, body) =
+            send(state.clone(), "GET", &format!("/jobs/{}/files", job.id), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let files: Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            files
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file["path"] == "attempt-0001/source.mp3")
+        );
+        let (status, body) = send(
+            state,
+            "POST",
+            &format!("/jobs/{}/file-info", job.id),
+            r#"{"path":"attempt-0001/source.mp3"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let metadata: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(metadata["bytes"], 16);
+        assert_eq!(metadata["sha256"].as_str().unwrap().len(), 64);
     }
 
     #[tokio::test]

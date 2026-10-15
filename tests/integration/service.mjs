@@ -226,14 +226,16 @@ try {
   console.log(
     "[integration] video downloads: video/audio, retries and live rejection",
   );
-  for (const [id, audioOnly] of [
+  for (const [id, audioOnly, fileFormat] of [
     ["vodwarn0001", false],
-    ["vodvideo001", false],
-    ["vodaudio001", true],
-    ["vodretry001", false],
+    ["vodvideo001", false, "mp4"],
+    ["vodaudio001", true, "mp3"],
+    ["vodm4a00001", true, "m4a"],
+    ["vodretry001", false, "mp4"],
   ]) {
     const download = await request("/downloads", "POST", {
       url: `https://youtu.be/${id}`,
+      download_format: fileFormat,
       recording_options: {
         audio_only: audioOnly,
         max_height: audioOnly ? null : 720,
@@ -248,6 +250,8 @@ try {
       return job.state === "completed" && job;
     }, `download ${id}`);
     assert.equal(complete.outputs.length, 1);
+    assert(complete.outputs[0].path.endsWith(`.${fileFormat ?? "mkv"}`));
+    if (fileFormat) assert.equal(complete.download_format, fileFormat);
     assert.equal(complete.outputs[0].has_audio, true);
     assert.equal(complete.outputs[0].has_video, !audioOnly);
     assert(complete.outputs[0].duration > 60);
@@ -257,7 +261,11 @@ try {
     const formats = await readFile(join(home, `${id}.formats`), "utf8");
     assert(
       formats.includes(
-        audioOnly ? "capture:ba" : "capture:bv*[height<=720]+ba/b[height<=720]",
+        audioOnly
+          ? "capture:ba"
+          : fileFormat === "mp4"
+            ? "capture:bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]"
+            : "capture:bv*[height<=720]+ba/b[height<=720]",
       ),
     );
     if (id === "vodretry001") {
@@ -266,7 +274,7 @@ try {
       assert(
         (
           await stat(
-            join(complete.output_dir, "attempt-0001", "source.mkv.part"),
+            join(complete.output_dir, "attempt-0001", "source.mp4.part"),
           )
         ).size > 0,
       );
@@ -282,8 +290,40 @@ try {
       assert.equal(failedRetry.outputs.length, 1);
       assert.equal(failedRetry.outputs[0].path, complete.outputs[0].path);
       assert.equal(failedRetry.outputs[0].sha256, complete.outputs[0].sha256);
+      assert.equal(failedRetry.download_format, "mp4");
       await request("/settings", "PUT", settings);
     }
+  }
+  const wrongFormat = await request("/downloads", "POST", {
+    url: "https://youtu.be/vodwrong001",
+    download_format: "mp4",
+  });
+  const partialFormat = await until(async () => {
+    const job = (await request("/snapshot")).jobs.find(
+      (j) => j.id === wrongFormat.id,
+    );
+    return job.state === "partial" && job;
+  }, "a different container cannot certify the requested format as completed");
+  assert.equal(partialFormat.outputs.length, 1);
+  assert(partialFormat.outputs.every((output) => output.path.endsWith(".mkv")));
+  for (const removeSource of [false, true]) {
+    if (removeSource)
+      await unlink(
+        join(partialFormat.output_dir, "attempt-0001", "source.mkv"),
+      );
+    await request(`/jobs/${wrongFormat.id}/recover`, "POST", {});
+    const recoveredAgain = await until(async () => {
+      const job = (await request("/snapshot")).jobs.find(
+        (j) => j.id === wrongFormat.id,
+      );
+      return job.state === "partial" && job;
+    }, "repeated recovery preserves the previous playable result");
+    assert.equal(recoveredAgain.outputs.length, 1);
+    assert.equal(recoveredAgain.outputs[0].path, partialFormat.outputs[0].path);
+    assert.equal(
+      recoveredAgain.outputs[0].sha256,
+      partialFormat.outputs[0].sha256,
+    );
   }
   const mergeSettings = (await request("/snapshot")).settings;
   await request("/settings", "PUT", {

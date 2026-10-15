@@ -63,7 +63,7 @@ pub fn new_recording_job(
     channel_id: Option<String>,
     replica_origin: bool,
 ) -> Result<RecordingJob> {
-    request.recording_options.validate()?;
+    request.validate_options()?;
     let stop_at = normalize_stop_at(request.stop_at.as_deref())?;
     request.schedule.validate(stop_at.as_deref())?;
     let mut schedule = request.schedule.clone();
@@ -73,6 +73,7 @@ pub fn new_recording_job(
     let at = now();
     Ok(RecordingJob {
         kind: request.kind,
+        download_format: request.download_format,
         schedule,
         protected: false,
         finished_at: None,
@@ -185,6 +186,7 @@ impl Store {
                 })
                 .map(|j| RecordRequest {
                     kind: j.kind,
+                    download_format: j.download_format,
                     url: j.url,
                     schedule: j.schedule,
                     stop_at: j.stop_at,
@@ -307,6 +309,7 @@ impl Store {
             }
             let canonical = RecordRequest {
                 kind: job.kind,
+                download_format: job.download_format,
                 url: job.url.clone(),
                 schedule: job.schedule.clone(),
                 stop_at: job.stop_at.clone(),

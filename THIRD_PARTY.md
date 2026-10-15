@@ -8,6 +8,7 @@ executables retain their own licenses. They run as separate processes.
 | yt-dlp | 2026.08.19 | https://github.com/yt-dlp/yt-dlp/tree/2026.08.19 | Source: Unlicense; standalone distributions include GPLv3+ components; see upstream THIRD_PARTY_LICENSES.txt |
 | Deno | v2.9.7 | https://github.com/denoland/deno/tree/v2.9.7 | MIT and bundled third-party notices |
 | FFmpeg / ffprobe (macOS) | Official source 9.0.2 | https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz | LGPL-2.1-or-later, default native codecs and Apple system frameworks; no `--enable-nonfree` |
+| LAME (statically linked into macOS FFmpeg) | 4.0 | https://downloads.sourceforge.net/project/lame/lame/4.0/lame-4.0.tar.gz | LGPL-2.0-or-later; source archive and COPYING accompany the application |
 | FFmpeg / ffprobe (Linux) | BtbN 8.1.3, autobuild-2026-09-21-13-55 | https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-09-21-13-55 | GPL build; source/build recipes in BtbN/FFmpeg-Builds |
 | FFmpeg / ffprobe (Windows) | ffmpeg-static b6.1.1 | https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1 | GPL build; platform README and license accompany binaries |
 
@@ -15,9 +16,9 @@ All binary assets are pinned by SHA-256 in `crates/engine/src/tools.rs`; filenam
 or release labels alone are not trusted. FFmpeg builds differ across platforms;
 `ytlr doctor` reports the actual binary version.
 
-macOS uses `packaging/build-ffmpeg.mjs`: source SHA-256 is pinned independently,
+macOS uses `packaging/build-ffmpeg.mjs`: FFmpeg and LAME source SHA-256 hashes are pinned independently,
 nonfree flags are rejected, and `otool` verifies that only system dynamic libraries
-are referenced. The application includes the corresponding source archive, build
+are referenced. LAME is linked statically for MP3 encoding. The application includes the corresponding source archives, build
 recipe, configuration and binary checksums under `Contents/Resources/tools/sources`
 and `FFmpeg-build-README.txt`. Earlier third-party macOS binaries contained nonfree
 components and are no longer downloaded or packaged. The macOS standalone CLI needs

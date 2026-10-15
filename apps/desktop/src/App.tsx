@@ -78,6 +78,7 @@ import {
   type Job,
   type Channel,
   type RecordingOptions,
+  type DownloadFormat,
   type JobEvent,
   type Remote,
   type Settings,
@@ -1228,9 +1229,11 @@ function RecordingSummary({
 function RecordingFields({
   options,
   onChange,
+  download = false,
 }: {
   options: RecordingOptions;
   onChange: (options: RecordingOptions) => void;
+  download?: boolean;
 }) {
   const { t } = useI18n();
   return (
@@ -1279,7 +1282,7 @@ function RecordingFields({
           </small>
         </label>
       )}
-      {options.audio_only && (
+      {options.audio_only && !download && (
         <p className="muted">
           {t("음성 전용 스트림을 원본 코덱으로 저장합니다.")}
         </p>
@@ -1383,6 +1386,7 @@ function AddDialog({
   const [name, setName] = useState("");
   const [start, setStart] = useState(fromStart);
   const [options, setOptions] = useState(defaultRecordingOptions);
+  const [downloadFormat, setDownloadFormat] = useState<DownloadFormat>("mp4");
   const [deadline, setDeadline] = useState(() => deadlineDraft());
   const [schedule, setSchedule] = useState<RecordingSchedule>({
     start_at: null,
@@ -1404,6 +1408,9 @@ function AddDialog({
         kind !== "channel"
           ? {
               kind: kind === "download" ? "download" : "live",
+              ...(kind === "download"
+                ? { download_format: downloadFormat }
+                : {}),
               url,
               live_from_start: kind === "download" ? false : start,
               priority: 0,
@@ -1460,7 +1467,43 @@ function AddDialog({
             onChange={(e) => setUrl(e.target.value)}
           />
         </label>
-        <RecordingFields options={options} onChange={setOptions} />
+        <RecordingFields
+          options={options}
+          download={kind === "download"}
+          onChange={(next) => {
+            if (next.audio_only !== options.audio_only) {
+              setDownloadFormat(next.audio_only ? "m4a" : "mp4");
+            }
+            setOptions(next);
+          }}
+        />
+        {kind === "download" && (
+          <label className="field">
+            {t("파일 형식")}
+            <select
+              value={downloadFormat}
+              onChange={(event) =>
+                setDownloadFormat(event.target.value as DownloadFormat)
+              }
+            >
+              {(options.audio_only
+                ? ["m4a", "mp3"]
+                : ["mp4", "mkv", "webm"]
+              ).map((format) => (
+                <option key={format} value={format}>
+                  {format.toUpperCase()}
+                </option>
+              ))}
+            </select>
+            <small>
+              {t(
+                options.audio_only
+                  ? "선택한 음성 형식으로 저장합니다. 필요한 경우 변환 시간이 추가됩니다."
+                  : "선택한 형식과 화질에 맞는 스트림을 재인코딩 없이 저장합니다.",
+              )}
+            </small>
+          </label>
+        )}
         {kind === "record" && (
           <>
             <StartFields value={schedule} onChange={setSchedule} />

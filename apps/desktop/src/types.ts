@@ -21,6 +21,7 @@ export interface RecordingOptions {
   audio_only: boolean;
   max_height: 480 | 720 | 1080 | null;
 }
+export type DownloadFormat = "mp4" | "mkv" | "webm" | "mp3" | "m4a";
 export const defaultRecordingOptions: RecordingOptions = {
   audio_only: false,
   max_height: null,
@@ -33,6 +34,7 @@ export const channelErrorLabels: Record<string, string> = {
 };
 export interface Job {
   kind?: "live" | "download";
+  download_format?: DownloadFormat | null;
   schedule?: RecordingSchedule;
   protected?: boolean;
   finished_at?: string | null;

@@ -2,6 +2,7 @@
 // Deterministic process-boundary fixture. Media data is a real FFmpeg-generated file.
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 const args = process.argv.slice(2);
 const home = process.env.YTLR_FIXTURE;
@@ -47,7 +48,7 @@ if (fs.existsSync(path.join(home, `${id}.fail`))) {
 const selector = args.includes("--format")
   ? args[args.indexOf("--format") + 1]
   : "default";
-const audioOnly = selector === "ba";
+const audioOnly = selector.startsWith("ba");
 fs.appendFileSync(
   path.join(home, `${id}.formats`),
   `${args.includes("--dump-single-json") ? "inspect" : "capture"}:${selector}\n`,
@@ -139,7 +140,13 @@ if (args.includes("--dump-single-json")) {
   process.exit(0);
 }
 const template = args[args.indexOf("--output") + 1];
-const output = template.replace("%(ext)s", "mkv");
+const outputFormat =
+  id === "vodwrong001"
+    ? "mkv"
+    : args.includes("--audio-format")
+      ? args[args.indexOf("--audio-format") + 1]
+      : (args[args.indexOf("--remux-video") + 1] ?? "mkv");
+const output = template.replace("%(ext)s", outputFormat);
 const folder = path.dirname(output);
 fs.mkdirSync(folder, { recursive: true });
 const marker = path.join(home, `active-${process.pid}`);
@@ -152,13 +159,34 @@ console.log(
       format: audioOnly ? "audio only" : "test highest",
     }),
 );
-const media = fs.readFileSync(
+let media = fs.readFileSync(
   path.join(home, audioOnly ? "sample.mka" : "sample.mkv"),
 );
 if (id === "vodretry001" && folder.endsWith("attempt-0003")) {
   fs.rmSync(marker, { force: true });
   console.error("ERROR: download failed before receiving media");
   process.exit(1);
+}
+if (outputFormat !== "mkv") {
+  const converted = spawnSync(
+    process.env.YTLR_FFMPEG,
+    [
+      "-v",
+      "error",
+      "-i",
+      path.join(home, audioOnly ? "sample.mka" : "sample.mkv"),
+      "-c",
+      outputFormat === "mp3" ? "libmp3lame" : "copy",
+      "-f",
+      outputFormat === "m4a" ? "ipod" : outputFormat,
+      `${output}.part`,
+    ],
+    { encoding: "utf8" },
+  );
+  if (converted.status !== 0) throw new Error(converted.stderr);
+  if (outputFormat === "mp3")
+    fs.writeFileSync(path.join(folder, "source.mka"), media);
+  media = fs.readFileSync(`${output}.part`);
 }
 fs.writeFileSync(`${output}.part`, media);
 if (id.startsWith("vod")) {

@@ -19,9 +19,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use ytlr_core::{
-    JobKind, JobState, RecordingJob, RecordingOptions, Settings, Store, atomic_write,
-    note_media_received, now, private_dir,
+    DownloadFormat, JobKind, JobState, RecordingJob, RecordingOptions, Settings, Store,
+    atomic_write, note_media_received, now, private_dir,
 };
+
+const UNAVAILABLE_DOWNLOAD_FORMAT: &str =
+    "선택한 파일 형식과 화질에 맞는 스트림이 없습니다. 다른 형식이나 화질을 선택하세요.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoInfo {
@@ -96,29 +99,42 @@ pub async fn inspect(
     tools: &Tools,
     url: &str,
     options: &RecordingOptions,
+    download_format: Option<DownloadFormat>,
     cookies: Option<&Path>,
     po_token: Option<&Path>,
 ) -> Result<VideoInfo> {
     options.validate()?;
     let mut cmd = Command::new(tools.require("yt-dlp")?);
     let arguments = base_args(tools, cookies, po_token)?;
-    cmd.args(&arguments.args)
-        .args(["--format", &options.format_selector()])
-        .args([
-            "--no-playlist",
-            "--skip-download",
-            "--dump-single-json",
-            "--ignore-no-formats-error",
-            "--",
-            url,
-        ])
-        .kill_on_drop(true);
+    let selector = download_format.map_or_else(
+        || options.format_selector(),
+        |format| format.format_selector(options),
+    );
+    cmd.args(&arguments.args).args(["--format", &selector]);
+    if download_format.is_none() {
+        cmd.arg("--ignore-no-formats-error");
+    }
+    cmd.args([
+        "--no-playlist",
+        "--skip-download",
+        "--dump-single-json",
+        "--",
+        url,
+    ])
+    .kill_on_drop(true);
     process::hide_console(&mut cmd);
     let output = process::output_timeout(cmd, Duration::from_secs(90))
         .await
         .context("방송 정보 확인 실패")?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
+        if download_format.is_some()
+            && err
+                .to_ascii_lowercase()
+                .contains("requested format is not available")
+        {
+            bail!("{UNAVAILABLE_DOWNLOAD_FORMAT}");
+        }
         if err.contains("live event will begin") || err.contains("Premiere will begin") {
             return Ok(VideoInfo {
                 id: String::new(),
@@ -226,13 +242,40 @@ pub fn capture_args(
         "--no-playlist", "--no-simulate", "--newline", "--progress", "--progress-delta", "1",
         "--keep-fragments", "--keep-video", "--no-overwrites", "--no-post-overwrites",
         "--fragment-retries", "5", "--retry-sleep", "fragment:exp=1:10", "--concurrent-fragments", "2",
-        "--merge-output-format", "mkv", "--remux-video", "mkv",
         "--fixup", "never",
         "--progress-template", "download:__YTLR_PROGRESS__{\"bytes\":%(progress.downloaded_bytes)j,\"track\":%(info.format_id)j,\"status\":%(progress.status)j}",
         "--print", "before_dl:__YTLR_INFO__%(.{id,title,channel,format,resolution,format_id})j",
         // --print enables quiet mode, which suppresses ordinary [Merger] messages.
         "--print", "post_process:__YTLR_FINALIZING__%(id)j",
     ].into_iter().map(String::from));
+    if let Some(format) = job.download_format.filter(|format| format.audio_only()) {
+        args.extend(
+            [
+                "--extract-audio",
+                "--audio-format",
+                format.extension(),
+                "--audio-quality",
+                "0",
+            ]
+            .into_iter()
+            .map(String::from),
+        );
+    } else {
+        let extension = job
+            .download_format
+            .unwrap_or(DownloadFormat::Mkv)
+            .extension();
+        args.extend(
+            [
+                "--merge-output-format",
+                extension,
+                "--remux-video",
+                extension,
+            ]
+            .into_iter()
+            .map(String::from),
+        );
+    }
     args.push(
         if job.kind == JobKind::Download {
             "--abort-on-unavailable-fragments"
@@ -246,7 +289,16 @@ pub fn capture_args(
         args.extend(["--match-filter".into(), "!is_live & !is_upcoming".into()]);
     }
     job.recording_options.validate()?;
-    args.extend(["--format".into(), job.recording_options.format_selector()]);
+    if let Some(format) = job.download_format {
+        format.validate(job.kind, &job.recording_options)?;
+    }
+    args.extend([
+        "--format".into(),
+        job.download_format.map_or_else(
+            || job.recording_options.format_selector(),
+            |format| format.format_selector(&job.recording_options),
+        ),
+    ]);
     // New attempts have distinct filenames. Unknown boundaries are never appended blindly.
     args.push(
         if job.kind == JobKind::Live && job.live_from_start && job.attempt == 1 {
@@ -403,7 +455,7 @@ pub async fn capture(
     atomic_write(
         &attempt.join("session.json"),
         &serde_json::to_vec_pretty(
-            &serde_json::json!({"video_id":job.video_id,"attempt":job.attempt,"started_at":now(),"from_start":job.live_from_start && job.attempt == 1,"recording_options":job.recording_options}),
+            &serde_json::json!({"video_id":job.video_id,"attempt":job.attempt,"started_at":now(),"from_start":job.live_from_start && job.attempt == 1,"recording_options":job.recording_options,"download_format":job.download_format}),
         )?,
     )?;
     let started_at = now();
@@ -516,11 +568,17 @@ pub async fn capture(
                         store.event(&job.id, "gap", &arguments.auth.scrub(&line))?;
                     } else if lower.contains("error") || lower.contains("warning") {
                         store.event(&job.id, "engine", &arguments.auth.scrub(&line))?;
-                        if !interrupted { reason = arguments.auth.scrub(&line); }
+                        if !interrupted {
+                            reason = if job.download_format.is_some() && lower.contains("requested format is not available") {
+                                UNAVAILABLE_DOWNLOAD_FORMAT.into()
+                            } else {
+                                arguments.auth.scrub(&line)
+                            };
+                        }
                     }
                     if line.starts_with("__YTLR_FINALIZING__") || line.starts_with("[Merger]") || line.starts_with("[VideoRemuxer]") {
                         finalizing = true;
-                        store.update_job(&job.id, |j| { j.state = JobState::Finalizing; j.message = "병합 중 · 원본 유지".into(); })?;
+                        store.update_job(&job.id, |j| { j.state = JobState::Finalizing; j.message = if j.kind == JobKind::Download { "병합·변환 중 · 원본 유지" } else { "병합 중 · 원본 유지" }.into(); })?;
                     }
                 }
             }

@@ -273,18 +273,36 @@ pub async fn discover_outputs(
     tools: &Tools,
     root: &Path,
     options: &ytlr_core::RecordingOptions,
+    download_format: Option<ytlr_core::DownloadFormat>,
 ) -> Result<Vec<MediaOutput>> {
     let mut outputs = vec![];
     let mut seen_attempts = HashSet::new();
     let mut files = files_under(root)?;
+    let requested_file = download_format.map(|format| format!("source.{}", format.extension()));
     files.sort_by_key(|p| {
-        if p.extension().is_some_and(|e| e == "mkv") {
+        if requested_file
+            .as_ref()
+            .is_some_and(|name| p.ends_with(name))
+        {
             0
-        } else {
+        } else if p.extension().is_some_and(|e| e == "mkv") {
             1
+        } else {
+            2
         }
     });
     for path in files {
+        // Kept source tracks (especially audio before conversion) are not the requested result.
+        // Preserve earlier recoveries as fallbacks when conversion failed or sources were cleaned.
+        if let Some(name) = &requested_file
+            && !path.ends_with(name)
+            && !(path.extension().is_some_and(|ext| ext == "mkv")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("recovered-")))
+        {
+            continue;
+        }
         let parent = path.parent().context("출력 경로 오류")?.to_owned();
         if !parent
             .file_name()
@@ -304,6 +322,7 @@ pub async fn discover_outputs(
                     || ext == "webm"
                     || ext == "mka"
                     || ext == "m4a"
+                    || ext == "mp3"
                     || ext == "opus"
             })
             && let Ok(media) = probe(tools, &path).await

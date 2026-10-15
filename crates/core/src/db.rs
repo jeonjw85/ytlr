@@ -134,7 +134,7 @@ impl Store {
         key: Option<&str>,
         occurrence: Option<&str>,
     ) -> Result<RecordingJob> {
-        request.recording_options.validate()?;
+        request.validate_options()?;
         let stop_at = normalize_stop_at(request.stop_at.as_deref())?;
         request.schedule.validate(stop_at.as_deref())?;
         let mut schedule = request.schedule.clone();
@@ -192,6 +192,7 @@ impl Store {
                 && request.live_from_start.unwrap_or(settings.live_from_start);
             if !automatic
                 && (job.kind != request.kind
+                    || job.download_format != request.download_format
                     || job.recording_options != request.recording_options
                     || job.live_from_start != requested_live_from_start
                     || job.stop_at != stop_at
@@ -634,6 +635,7 @@ mod tests {
             .add_job(
                 &RecordRequest {
                     kind: JobKind::Live,
+                    download_format: None,
                     schedule: RecordingSchedule::default(),
                     stop_at: None,
                     url: "https://youtu.be/abcdefghijk".into(),
@@ -655,11 +657,19 @@ mod tests {
         );
         let mut old = serde_json::to_value(saved).unwrap();
         old.as_object_mut().unwrap().remove("recording_options");
-        for key in ["kind", "stop_at", "bookmarks", "alerts", "recovery_error"] {
+        for key in [
+            "kind",
+            "download_format",
+            "stop_at",
+            "bookmarks",
+            "alerts",
+            "recovery_error",
+        ] {
             old.as_object_mut().unwrap().remove(key);
         }
         let legacy: RecordingJob = serde_json::from_value(old).unwrap();
         assert_eq!(legacy.kind, JobKind::Live);
+        assert_eq!(legacy.download_format, None);
         assert_eq!(legacy.recording_options, RecordingOptions::default());
         let invalid: RecordRequest = serde_json::from_value(serde_json::json!({
             "url": "https://youtu.be/lmnopqrstuv", "recording_options": {"max_height": 999}
@@ -668,6 +678,130 @@ mod tests {
         assert!(db.add_job(&invalid, None, false).is_err());
         assert_eq!(db.jobs().unwrap().len(), 1);
     }
+    #[test]
+    fn download_formats_survive_restart_and_configuration_round_trip() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
+        let settings = paths.default_settings();
+        let db = Store::open(&paths.database(), &settings).unwrap();
+        let mut ids = vec![];
+        for (index, (format, audio_only)) in [
+            ("mp4", false),
+            ("mkv", false),
+            ("webm", false),
+            ("mp3", true),
+            ("m4a", true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request = serde_json::from_value(serde_json::json!({
+                "url": format!("https://youtu.be/format{index:05}"), "kind": "download",
+                "download_format": format, "recording_options": {"audio_only": audio_only}
+            }))
+            .unwrap();
+            let job = db.add_job(&request, None, false).unwrap();
+            ids.push((job.id, format));
+        }
+        drop(db);
+        let db = Store::open(&paths.database(), &settings).unwrap();
+        for (id, format) in &ids {
+            assert_eq!(
+                serde_json::to_value(db.job(id).unwrap()).unwrap()["download_format"],
+                *format
+            );
+        }
+        let bundle = db.export_configuration().unwrap();
+        for (request, (_, format)) in bundle.schedules.iter().zip(&ids) {
+            assert_eq!(
+                serde_json::to_value(request).unwrap()["download_format"],
+                *format
+            );
+        }
+        let imported_dir = tempfile::tempdir().unwrap();
+        let imported_paths = AppPaths::resolve(Some(imported_dir.path().to_owned())).unwrap();
+        let imported = Store::open(
+            &imported_paths.database(),
+            &imported_paths.default_settings(),
+        )
+        .unwrap();
+        imported
+            .import_configuration(
+                &ConfigurationImport {
+                    bundle,
+                    replace_channels: false,
+                    apply_settings: false,
+                    storage_root: None,
+                },
+                false,
+            )
+            .unwrap();
+        let mut formats: Vec<_> = imported
+            .jobs()
+            .unwrap()
+            .into_iter()
+            .map(|job| {
+                serde_json::to_value(job).unwrap()["download_format"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        formats.sort();
+        assert_eq!(formats, ["m4a", "mkv", "mp3", "mp4", "webm"]);
+    }
+
+    #[test]
+    fn download_formats_reject_incompatible_modes_and_live_jobs() {
+        let d = tempfile::tempdir().unwrap();
+        let settings = AppPaths::resolve(Some(d.path().to_owned()))
+            .unwrap()
+            .default_settings();
+        for (kind, audio_only, format) in [
+            ("download", true, "mp4"),
+            ("download", true, "mkv"),
+            ("download", true, "webm"),
+            ("download", false, "mp3"),
+            ("download", false, "m4a"),
+            ("live", false, "mp4"),
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "url": "https://youtu.be/abcdefghijk", "kind": kind,
+                "download_format": format, "recording_options": {"audio_only": audio_only}
+            }))
+            .unwrap();
+            assert!(
+                new_recording_job(&request, &settings, None, false).is_err(),
+                "{kind}/{audio_only}/{format}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<RecordRequest>(serde_json::json!({
+                "url": "https://youtu.be/abcdefghijk", "kind": "download", "download_format": "avi"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn duplicate_download_cannot_silently_change_file_format() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = AppPaths::resolve(Some(d.path().to_owned())).unwrap();
+        let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
+        let request = |format| {
+            serde_json::from_value(serde_json::json!({
+                "url": "https://youtu.be/abcdefghijk", "kind": "download", "download_format": format
+            }))
+            .unwrap()
+        };
+        let first = db.add_job(&request("mp4"), None, false).unwrap();
+        assert_eq!(
+            db.add_job(&request("mp4"), None, false).unwrap().id,
+            first.id
+        );
+        assert!(db.add_job(&request("webm"), None, false).is_err());
+    }
+
     #[test]
     fn downloads_persist_kind_and_do_not_inherit_live_from_start() {
         let d = tempfile::tempdir().unwrap();
@@ -708,6 +842,7 @@ mod tests {
         let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
         let req = RecordRequest {
             kind: JobKind::Live,
+            download_format: None,
             schedule: RecordingSchedule::default(),
             stop_at: None,
             recording_options: RecordingOptions::default(),
@@ -746,6 +881,7 @@ mod tests {
         let db = Store::open(&paths.database(), &paths.default_settings()).unwrap();
         let req = RecordRequest {
             kind: JobKind::Live,
+            download_format: None,
             schedule: RecordingSchedule::default(),
             stop_at: None,
             recording_options: RecordingOptions::default(),
