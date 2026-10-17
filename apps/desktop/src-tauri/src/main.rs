@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod desktop_tools;
-#[cfg(test)]
+#[cfg(any(target_os = "macos", test))]
 mod service_status;
 mod updates;
 
@@ -32,14 +32,22 @@ struct TrayLabels {
 }
 
 #[tauri::command]
-fn set_ui_language(labels: State<'_, TrayLabels>, language: String) -> Result<(), String> {
+fn set_ui_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
     let (show, quit) = match language.as_str() {
         "en" => ("Open YTLR", "Quit app (keep recording)"),
         "ko" => ("YTLR 열기", "앱 종료 (녹화 유지)"),
         _ => return Err("Unsupported language".into()),
     };
-    labels.show.set_text(show).map_err(|e| e.to_string())?;
-    labels.quit.set_text(quit).map_err(|e| e.to_string())
+    if let Some(labels) = app.try_state::<TrayLabels>() {
+        labels.show.set_text(show).map_err(|e| e.to_string())?;
+        labels.quit.set_text(quit).map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    service_status::save_language(
+        &app.state::<Bridge>().paths,
+        service_status::Language::parse(&language)?,
+    )?;
+    Ok(())
 }
 
 #[derive(Default)]
@@ -262,7 +270,26 @@ fn connection(bridge: State<'_, Bridge>) -> Result<String, String> {
         .unwrap_or_else(|| "local".into()))
 }
 
+fn context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 fn main() {
+    #[cfg(target_os = "macos")]
+    match service_status::mode_paths(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
+        Ok(Some(paths)) => {
+            if let Err(error) = service_status::macos::run(paths) {
+                eprintln!("Service status failed: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if args.iter().any(|arg| arg == "--autostart") {
@@ -376,7 +403,7 @@ fn main() {
             desktop_tools::download_action,
             desktop_tools::open_operation
         ])
-        .build(tauri::generate_context!())
+        .build(context())
         .expect("데스크톱 앱 실행 실패")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, .. } = event

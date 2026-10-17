@@ -177,5 +177,15 @@ pub fn load_language(paths: &AppPaths) -> Language {
         .language
 }
 
+async fn read_status(client: &ytlr_service::client::Client) -> Result<StatusSnapshot, String> {
+    client
+        .get("/snapshot")
+        .await
+        .map_err(|_| "Unable to read local server status".into())
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(target_os = "macos")]
+pub mod macos;

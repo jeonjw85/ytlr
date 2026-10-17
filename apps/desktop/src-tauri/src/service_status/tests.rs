@@ -168,3 +168,73 @@ fn status_language_is_validated_and_persisted_without_secrets() {
     .unwrap();
     assert_eq!(load_language(&paths), Language::En);
 }
+
+#[tokio::test]
+async fn status_reads_are_authenticated_read_only_and_recover_after_http_failure() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = calls.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let paths = AppPaths::resolve(Some(d.path().into())).unwrap();
+    let endpoint = ytlr_core::ServiceEndpoint {
+        api_version: ytlr_core::SERVICE_API_VERSION,
+        port: listener.local_addr().unwrap().port(),
+        token: "test-status-auth".into(),
+        pid: std::process::id(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    };
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().route(
+                "/snapshot",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let calls = handler_calls.clone();
+                    async move {
+                        if headers.get("authorization").and_then(|h| h.to_str().ok())
+                            != Some("Bearer test-status-auth")
+                        {
+                            return (
+                                axum::http::StatusCode::UNAUTHORIZED,
+                                axum::Json(serde_json::json!({"error":"Unauthorized"})),
+                            );
+                        }
+                        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                            return (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                axum::Json(
+                                    serde_json::json!({"error":"do-not-leak-test-status-auth"}),
+                                ),
+                            );
+                        }
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(
+                                serde_json::json!({"jobs":[{"state":"recording", "kind":"live"}]}),
+                            ),
+                        )
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let client = ytlr_service::client::Client::new(paths)
+        .unwrap()
+        .with_endpoint(endpoint);
+    assert_eq!(
+        read_status(&client).await.err().unwrap(),
+        "Unable to read local server status"
+    );
+    assert_eq!(
+        StatusSummary::from_snapshot(&read_status(&client).await.unwrap()).recordings,
+        1
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    task.abort();
+}

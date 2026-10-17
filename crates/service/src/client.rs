@@ -102,6 +102,15 @@ impl Client {
         self
     }
 
+    pub fn with_timeout(mut self, timeout: Duration) -> Result<Self> {
+        self.http = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(timeout)
+            .build()?;
+        Ok(self)
+    }
+
     pub fn with_endpoint(mut self, endpoint: ServiceEndpoint) -> Self {
         self.endpoint = Some(endpoint);
         self
@@ -278,6 +287,46 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn custom_timeout_bounds_polling_without_changing_other_clients() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = ServiceEndpoint {
+            api_version: SERVICE_API_VERSION,
+            port: listener.local_addr().unwrap().port(),
+            token: "unused".into(),
+            pid: 0,
+            version: env!("CARGO_PKG_VERSION").into(),
+        };
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/snapshot",
+                    axum::routing::get(|| async {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        axum::Json(serde_json::json!({"jobs":[]}))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let d = tempfile::tempdir().unwrap();
+        let ordinary = Client::new(AppPaths::resolve(Some(d.path().into())).unwrap())
+            .unwrap()
+            .with_endpoint(endpoint);
+        let poller = ordinary
+            .clone()
+            .with_timeout(Duration::from_millis(20))
+            .unwrap();
+        assert!(poller.get::<Value>("/snapshot").await.is_err());
+        assert_eq!(
+            ordinary.get::<Value>("/snapshot").await.unwrap(),
+            serde_json::json!({"jobs":[]})
+        );
+        server.abort();
+    }
 
     // Model an older service: it accepts the request but drops unknown format fields.
     async fn legacy_download_service(
