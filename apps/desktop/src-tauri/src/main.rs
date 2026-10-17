@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod desktop_tools;
+#[cfg(test)]
+mod service_status;
 mod updates;
 
 use std::{
