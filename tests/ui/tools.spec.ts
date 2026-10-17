@@ -118,7 +118,7 @@ test("startup preferences, notification testing, portable import and real previe
         return call(args.path, args.method, args.body ?? undefined);
       if (command === "update_status")
         return {
-          current_version: "0.2.5",
+          current_version: "0.2.6",
           available: false,
           auto_check: false,
           phase: "idle",
