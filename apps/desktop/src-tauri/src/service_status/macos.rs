@@ -84,6 +84,49 @@ impl StatusTray {
     }
 }
 
+fn attach(executable: &Path, paths: &AppPaths) -> io::Result<bool> {
+    if !service_running(paths)? {
+        return Ok(false);
+    }
+    let Some(lock) = try_status_lock(paths)? else {
+        return Ok(false);
+    };
+    // The helper acquires and retains the authoritative lock in its own process.
+    drop(lock);
+    let mut command = client_command(executable, paths);
+    command
+        .arg("--service-status")
+        .arg("--data-dir")
+        .arg(&paths.root);
+    spawn_detached(command)?;
+    Ok(true)
+}
+
+pub fn setup(app: &tauri::AppHandle) -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut failed = false;
+        loop {
+            let result = {
+                let bridge = handle.state::<crate::Bridge>();
+                let _gate = bridge.local_gate.read().await;
+                if handle.state::<crate::updates::AppUpdates>().installing() {
+                    Ok(false)
+                } else {
+                    attach(&executable, &bridge.paths)
+                }
+            };
+            if result.is_err() && !failed {
+                eprintln!("Unable to start local service indicator; retrying in background");
+            }
+            failed = result.is_err();
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    });
+    Ok(())
+}
+
 pub fn run(paths: AppPaths) -> Result<(), String> {
     if !service_running(&paths).map_err(|e| e.to_string())? {
         return Ok(());
@@ -164,10 +207,10 @@ pub fn run(paths: AppPaths) -> Result<(), String> {
                 code: None, api, ..
             } => api.prevent_exit(),
             // Finder may target the accessory process because it shares the app bundle.
-            tauri::RunEvent::Reopen { .. } => {
-                if spawn_detached(client_command(&open_executable, &open_paths)).is_err() {
-                    eprintln!("Unable to open YTLR client");
-                }
+            tauri::RunEvent::Reopen { .. }
+                if spawn_detached(client_command(&open_executable, &open_paths)).is_err() =>
+            {
+                eprintln!("Unable to open YTLR client");
             }
             _ => {}
         });
@@ -177,6 +220,68 @@ pub fn run(paths: AppPaths) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_server(paths: &AppPaths) -> File {
+        std::fs::write(paths.endpoint_file(), b"{}").unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(paths.root.join("service.lock"))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+        lock
+    }
+
+    #[test]
+    fn launcher_skips_stale_endpoints_and_an_existing_status_process() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = AppPaths::resolve(Some(d.path().into())).unwrap();
+        let nonexistent = paths.root.join("nonexistent-client");
+        assert!(!attach(&nonexistent, &paths).unwrap());
+        let service = test_server(&paths);
+        let helper = try_status_lock(&paths).unwrap().unwrap();
+        assert!(!attach(&nonexistent, &paths).unwrap());
+        drop(helper);
+        drop(service);
+        assert!(!attach(&nonexistent, &paths).unwrap());
+    }
+
+    #[tokio::test]
+    async fn launcher_starts_a_detached_helper_with_an_explicit_data_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let paths = AppPaths::resolve(Some(d.path().into())).unwrap();
+        let _service = test_server(&paths);
+        let executable = paths.root.join("test client with spaces");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$YTLR_HOME/args\"\nprintf '%s' \"$$\" > \"$YTLR_HOME/pid\"\n/bin/ps -o pgid= -p $$ > \"$YTLR_HOME/group\"\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(attach(&executable, &paths).unwrap());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while std::fs::read_to_string(paths.root.join("group"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .is_none()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(paths.root.join("args")).unwrap(),
+            format!("--service-status\n--data-dir\n{}\n", paths.root.display())
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.root.join("pid"))
+                .unwrap()
+                .trim(),
+            std::fs::read_to_string(paths.root.join("group"))
+                .unwrap()
+                .trim()
+        );
+    }
 
     #[test]
     fn helper_context_has_no_windows() {

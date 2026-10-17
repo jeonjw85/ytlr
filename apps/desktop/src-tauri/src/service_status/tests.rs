@@ -103,8 +103,8 @@ fn helper_mode_requires_an_explicit_absolute_data_directory() {
     );
 }
 
-#[test]
-fn status_lock_is_unique_per_data_directory_and_released_on_exit() {
+#[tokio::test]
+async fn status_lock_is_unique_per_data_directory_and_released_on_exit() {
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
     let paths = AppPaths::resolve(Some(first.path().into())).unwrap();
@@ -113,7 +113,14 @@ fn status_lock_is_unique_per_data_directory_and_released_on_exit() {
     assert!(try_status_lock(&paths).unwrap().is_none());
     assert!(try_status_lock(&other).unwrap().is_some());
     drop(guard);
-    assert!(try_status_lock(&paths).unwrap().is_some());
+    // Concurrent spawn tests can briefly inherit this descriptor between fork and exec.
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while try_status_lock(&paths).unwrap().is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[test]

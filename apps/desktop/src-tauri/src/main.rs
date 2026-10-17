@@ -26,6 +26,7 @@ struct Bridge {
     session: Mutex<Session>,
 }
 
+#[cfg(not(target_os = "macos"))]
 struct TrayLabels {
     show: tauri::menu::MenuItem<tauri::Wry>,
     quit: tauri::menu::MenuItem<tauri::Wry>,
@@ -33,21 +34,22 @@ struct TrayLabels {
 
 #[tauri::command]
 fn set_ui_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
-    let (show, quit) = match language.as_str() {
-        "en" => ("Open YTLR", "Quit app (keep recording)"),
-        "ko" => ("YTLR 열기", "앱 종료 (녹화 유지)"),
-        _ => return Err("Unsupported language".into()),
-    };
-    if let Some(labels) = app.try_state::<TrayLabels>() {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let (show, quit) = match language.as_str() {
+            "en" => ("Open YTLR", "Quit app (keep recording)"),
+            "ko" => ("YTLR 열기", "앱 종료 (녹화 유지)"),
+            _ => return Err("Unsupported language".into()),
+        };
+        let labels = app.state::<TrayLabels>();
         labels.show.set_text(show).map_err(|e| e.to_string())?;
-        labels.quit.set_text(quit).map_err(|e| e.to_string())?;
+        labels.quit.set_text(quit).map_err(|e| e.to_string())
     }
     #[cfg(target_os = "macos")]
     service_status::save_language(
         &app.state::<Bridge>().paths,
         service_status::Language::parse(&language)?,
-    )?;
-    Ok(())
+    )
 }
 
 #[derive(Default)]
@@ -332,36 +334,48 @@ fn main() {
             });
             updates::setup(app.handle());
             desktop_tools::setup(app.handle());
-            use tauri::menu::{Menu, MenuItem};
-            let show = MenuItem::with_id(app, "show", "Open YTLR", true, None::<&str>)?;
-            let quit =
-                MenuItem::with_id(app, "quit", "Quit app (keep recording)", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
-            app.manage(TrayLabels { show, quit });
-            let mut rgba = vec![0u8; 20 * 20 * 4];
-            for y in 0..20 {
-                for x in 0..20 {
-                    let p = (y * 20 + x) * 4;
-                    if (x as i32 - 10).pow(2) + (y as i32 - 10).pow(2) < 64 {
-                        rgba[p..p + 4].copy_from_slice(&[235, 93, 107, 255]);
-                    }
-                }
+            #[cfg(target_os = "macos")]
+            if service_status::macos::setup(app.handle()).is_err() {
+                eprintln!("Unable to initialize local service indicator");
             }
-            tauri::tray::TrayIconBuilder::new()
-                .icon(tauri::image::Image::new_owned(rgba, 20, 20))
-                .tooltip("YTLR")
-                .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
+            #[cfg(not(target_os = "macos"))]
+            {
+                use tauri::menu::{Menu, MenuItem};
+                let show = MenuItem::with_id(app, "show", "Open YTLR", true, None::<&str>)?;
+                let quit = MenuItem::with_id(
+                    app,
+                    "quit",
+                    "Quit app (keep recording)",
+                    true,
+                    None::<&str>,
+                )?;
+                let menu = Menu::with_items(app, &[&show, &quit])?;
+                app.manage(TrayLabels { show, quit });
+                let mut rgba = vec![0u8; 20 * 20 * 4];
+                for y in 0..20 {
+                    for x in 0..20 {
+                        let p = (y * 20 + x) * 4;
+                        if (x as i32 - 10).pow(2) + (y as i32 - 10).pow(2) < 64 {
+                            rgba[p..p + 4].copy_from_slice(&[235, 93, 107, 255]);
                         }
                     }
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .build(app)?;
+                }
+                tauri::tray::TrayIconBuilder::new()
+                    .icon(tauri::image::Image::new_owned(rgba, 20, 20))
+                    .tooltip("YTLR")
+                    .menu(&menu)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "show" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                        "quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .build(app)?;
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
