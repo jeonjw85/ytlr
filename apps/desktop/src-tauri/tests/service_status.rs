@@ -244,3 +244,83 @@ async fn status_process_outlives_client_and_stops_without_restarting_service() {
     );
     server.abort();
 }
+
+#[tokio::test]
+#[ignore = "launches native macOS menu bar UI; run explicitly in a logged-in desktop session"]
+async fn startup_observer_survives_launcher_exit_before_service_is_ready() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = AppPaths::resolve(Some(home.path().into())).unwrap();
+    paths.initialize().unwrap();
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(paths.root.join("service.lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let count = requests.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = ServiceEndpoint {
+        api_version: SERVICE_API_VERSION,
+        port: listener.local_addr().unwrap().port(),
+        token: "startup-test".into(),
+        pid: std::process::id(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    };
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().route(
+                "/snapshot",
+                axum::routing::get(move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(serde_json::json!({"jobs":[]}))
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let _processes = Processes {
+        home: home.path(),
+        children: Vec::new(),
+        socket_identity: None,
+    };
+    let status = Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#""$1" --service-status --data-dir "$2" --wait-for-service &"#,
+            "status-test-launcher",
+            DESKTOP,
+            home.path().to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "launcher must have exited before service becomes ready"
+    );
+    wait_for(|| helper_pids(home.path()).len() == 1).await;
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    assert!(
+        !paths.endpoint_file().exists(),
+        "observer must not start a service"
+    );
+    ytlr_core::atomic_write(
+        &paths.endpoint_file(),
+        &serde_json::to_vec(&endpoint).unwrap(),
+    )
+    .unwrap();
+    wait_for(|| requests.load(Ordering::SeqCst) > 0).await;
+    std::fs::remove_file(paths.endpoint_file()).unwrap();
+    wait_for(|| helper_pids(home.path()).is_empty()).await;
+    server.abort();
+}

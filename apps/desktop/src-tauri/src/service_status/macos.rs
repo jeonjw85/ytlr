@@ -84,8 +84,8 @@ impl StatusTray {
     }
 }
 
-fn attach(executable: &Path, paths: &AppPaths) -> io::Result<bool> {
-    if !service_running(paths)? {
+fn attach(executable: &Path, paths: &AppPaths, wait_for_service: bool) -> io::Result<bool> {
+    if !wait_for_service && !service_running(paths)? {
         return Ok(false);
     }
     let Some(lock) = try_status_lock(paths)? else {
@@ -98,15 +98,25 @@ fn attach(executable: &Path, paths: &AppPaths) -> io::Result<bool> {
         .arg("--service-status")
         .arg("--data-dir")
         .arg(&paths.root);
+    if wait_for_service {
+        command.arg("--wait-for-service");
+    }
     spawn_detached(command)?;
     Ok(true)
 }
 
 pub fn setup(app: &tauri::AppHandle) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let paths = app.state::<crate::Bridge>().paths.clone();
+    paths.initialize().map_err(|e| e.to_string())?;
+    // Handoff is synchronous; even an immediate Cmd+Q cannot cancel the observer's startup wait.
+    let failed = attach(&executable, &paths, true).is_err();
+    if failed {
+        eprintln!("Unable to start local service indicator; retrying in background");
+    }
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let mut failed = false;
+        let mut failed = failed;
         loop {
             let result = {
                 let bridge = handle.state::<crate::Bridge>();
@@ -114,7 +124,7 @@ pub fn setup(app: &tauri::AppHandle) -> Result<(), String> {
                 if handle.state::<crate::updates::AppUpdates>().installing() {
                     Ok(false)
                 } else {
-                    attach(&executable, &bridge.paths)
+                    attach(&executable, &bridge.paths, false)
                 }
             };
             if result.is_err() && !failed {
@@ -127,13 +137,20 @@ pub fn setup(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run(paths: AppPaths) -> Result<(), String> {
-    if !service_running(&paths).map_err(|e| e.to_string())? {
+pub fn run(mode: StatusMode) -> Result<(), String> {
+    let paths = mode.paths;
+    if !mode.wait_for_service && !service_running(&paths).map_err(|e| e.to_string())? {
         return Ok(());
     }
     let Some(lock) = try_status_lock(&paths).map_err(|e| e.to_string())? else {
         return Ok(());
     };
+    if mode.wait_for_service
+        && !tauri::async_runtime::block_on(wait_for_service(&paths, Duration::from_secs(30)))
+            .map_err(|e| e.to_string())?
+    {
+        return Ok(());
+    }
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let client = Client::new(paths.clone())
         .and_then(|c| c.with_timeout(POLL_INTERVAL))
@@ -239,13 +256,44 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let paths = AppPaths::resolve(Some(d.path().into())).unwrap();
         let nonexistent = paths.root.join("nonexistent-client");
-        assert!(!attach(&nonexistent, &paths).unwrap());
+        assert!(!attach(&nonexistent, &paths, false).unwrap());
         let service = test_server(&paths);
         let helper = try_status_lock(&paths).unwrap().unwrap();
-        assert!(!attach(&nonexistent, &paths).unwrap());
+        assert!(!attach(&nonexistent, &paths, false).unwrap());
         drop(helper);
         drop(service);
-        assert!(!attach(&nonexistent, &paths).unwrap());
+        assert!(!attach(&nonexistent, &paths, false).unwrap());
+    }
+
+    #[tokio::test]
+    async fn startup_handoff_launches_without_a_ready_endpoint() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let paths = AppPaths::resolve(Some(d.path().into())).unwrap();
+        let executable = paths.root.join("startup-fixture");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$YTLR_HOME/args\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(attach(&executable, &paths, true).unwrap());
+        let expected = format!(
+            "--service-status\n--data-dir\n{}\n--wait-for-service\n",
+            paths.root.display()
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while std::fs::read_to_string(paths.root.join("args"))
+                .ok()
+                .as_deref()
+                != Some(expected.as_str())
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!paths.endpoint_file().exists());
     }
 
     #[tokio::test]
@@ -257,7 +305,7 @@ mod tests {
         let executable = paths.root.join("test client with spaces");
         std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$YTLR_HOME/args\"\nprintf '%s' \"$$\" > \"$YTLR_HOME/pid\"\n/bin/ps -o pgid= -p $$ > \"$YTLR_HOME/group\"\n").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(attach(&executable, &paths).unwrap());
+        assert!(attach(&executable, &paths, false).unwrap());
         tokio::time::timeout(Duration::from_secs(3), async {
             while std::fs::read_to_string(paths.root.join("group"))
                 .ok()

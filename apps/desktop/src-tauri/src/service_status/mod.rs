@@ -103,19 +103,33 @@ impl StatusSummary {
     }
 }
 
-pub fn mode_paths(args: &[OsString]) -> Result<Option<AppPaths>, String> {
+pub struct StatusMode {
+    pub paths: AppPaths,
+    pub wait_for_service: bool,
+}
+
+pub fn mode_paths(args: &[OsString]) -> Result<Option<StatusMode>, String> {
     if !args.iter().any(|arg| arg == "--service-status") {
         return Ok(None);
     }
-    if args.len() != 3 || args[0] != "--service-status" || args[1] != "--data-dir" {
-        return Err("Usage: --service-status --data-dir ABSOLUTE_PATH".into());
+    let wait_for_service = args.len() == 4 && args[3] == "--wait-for-service";
+    if (args.len() != 3 && !wait_for_service)
+        || args[0] != "--service-status"
+        || args[1] != "--data-dir"
+    {
+        return Err("Usage: --service-status --data-dir ABSOLUTE_PATH [--wait-for-service]".into());
     }
     let root = PathBuf::from(&args[2]);
     if !root.is_absolute() {
         return Err("Service status requires an absolute data directory".into());
     }
     AppPaths::resolve(Some(root))
-        .map(Some)
+        .map(|paths| {
+            Some(StatusMode {
+                paths,
+                wait_for_service,
+            })
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -142,6 +156,10 @@ pub fn service_running(paths: &AppPaths) -> io::Result<bool> {
     if !paths.endpoint_file().try_exists()? {
         return Ok(false);
     }
+    service_lock_held(paths)
+}
+
+fn service_lock_held(paths: &AppPaths) -> io::Result<bool> {
     let file = match OpenOptions::new()
         .read(true)
         .write(true)
@@ -155,6 +173,22 @@ pub fn service_running(paths: &AppPaths) -> io::Result<bool> {
         Ok(()) => Ok(false), // Closing the file immediately releases this probe lock.
         Err(e) if lock_contended(&e) => Ok(true),
         Err(e) => Err(e),
+    }
+}
+
+async fn wait_for_service(paths: &AppPaths, idle_grace: std::time::Duration) -> io::Result<bool> {
+    let started = std::time::Instant::now();
+    let mut initializing = false;
+    loop {
+        if service_running(paths)? {
+            return Ok(true);
+        }
+        let locked = service_lock_held(paths)?;
+        if !locked && (initializing || started.elapsed() >= idle_grace) {
+            return Ok(false);
+        }
+        initializing |= locked;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 

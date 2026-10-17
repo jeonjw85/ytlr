@@ -90,17 +90,33 @@ fn helper_mode_requires_an_explicit_absolute_data_directory() {
     ] {
         assert!(mode_paths(&args(&invalid)).is_err(), "{invalid:?}");
     }
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("data with spaces");
     assert_eq!(
-        mode_paths(&args(&[
-            "--service-status",
-            "--data-dir",
-            "/data with spaces"
-        ]))
+        mode_paths(&[
+            OsString::from("--service-status"),
+            OsString::from("--data-dir"),
+            root.clone().into_os_string(),
+        ])
         .unwrap()
         .unwrap()
+        .paths
         .root,
-        std::path::PathBuf::from("/data with spaces")
+        root
     );
+}
+
+#[test]
+fn startup_handoff_is_an_explicit_validated_mode() {
+    let d = tempfile::tempdir().unwrap();
+    let args = [
+        OsString::from("--service-status"),
+        OsString::from("--data-dir"),
+        d.path().as_os_str().into(),
+        OsString::from("--wait-for-service"),
+    ];
+    assert!(mode_paths(&args).unwrap().unwrap().wait_for_service);
+    assert!(!mode_paths(&args[..3]).unwrap().unwrap().wait_for_service);
 }
 
 #[tokio::test]
@@ -244,4 +260,64 @@ async fn status_reads_are_authenticated_read_only_and_recover_after_http_failure
     );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     task.abort();
+}
+
+#[tokio::test]
+async fn startup_observer_waits_for_initializing_service_beyond_idle_grace() {
+    let d = tempfile::tempdir().unwrap();
+    let paths = AppPaths::resolve(Some(d.path().into())).unwrap();
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(paths.root.join("service.lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let observer_paths = paths.clone();
+    let waiter = tokio::spawn(async move {
+        wait_for_service(&observer_paths, std::time::Duration::from_millis(20))
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !waiter.is_finished(),
+        "a service holding its startup lock is still initializing"
+    );
+    std::fs::write(paths.endpoint_file(), b"{}").unwrap();
+    assert!(waiter.await.unwrap());
+}
+
+#[tokio::test]
+async fn startup_observer_exits_if_no_service_starts_or_initialization_stops() {
+    let d = tempfile::tempdir().unwrap();
+    let paths = AppPaths::resolve(Some(d.path().into())).unwrap();
+    assert!(
+        !wait_for_service(&paths, std::time::Duration::from_millis(20))
+            .await
+            .unwrap()
+    );
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(paths.root.join("service.lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let observer_paths = paths.clone();
+    let waiter = tokio::spawn(async move {
+        wait_for_service(&observer_paths, std::time::Duration::from_secs(30))
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    drop(lock);
+    assert!(
+        !tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+    );
 }
